@@ -40,7 +40,8 @@ public class Zone {
         return id;
     }
 
-    //restituisce una vista di sola lettura delle zone vicine
+    // restituisce una vista di sola lettura delle zone vicine (pensato per fare in modo che nessuno dall'esterno possa aggiungere o rimuovere una zona vicina
+    // (non dovrebbe mai accadere perche la griglia viene calcolata una sola volta e non puo cambiare)
     public Set<ZoneId> getNeighbors() {
         return Collections.unmodifiableSet(neighbors);
     }
