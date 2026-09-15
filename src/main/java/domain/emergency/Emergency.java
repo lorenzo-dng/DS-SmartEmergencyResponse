@@ -63,7 +63,7 @@ public class Emergency {
         this.severity = severity;
     }
 
-    //solo di lettura, perche ogni modifica richiede "updateStatus", e potrebbe essere dimenticato quando la lista viene direttamente utilizzata per scrittura
+    // solo di lettura, perche ogni modifica richiede "updateStatus", e potrebbe essere dimenticato quando la lista viene direttamente utilizzata per scrittura
     public List<VehicleRequirement> getRequiredVehicles() {
         return Collections.unmodifiableList(requiredVehicles);
     }
@@ -75,8 +75,8 @@ public class Emergency {
         this.requiredVehicles = new ArrayList<>(requiredVehicles);
     }
 
-    //restituisce una vista di sola lettura dei veicoli assegnati
-    //questo perche ogni modifica richiede "updateStatus", e potrebbe essere dimenticato se la lista verrebbe direttamente utilizzata per scrittura
+    // restituisce una vista di sola lettura dei veicoli assegnati
+    // questo perche ogni modifica richiede "updateStatus", e potrebbe essere dimenticato se la lista verrebbe direttamente utilizzata per scrittura
     public List<VehicleId> getAssignedVehicles() {
         return Collections.unmodifiableList(assignedVehicles);
     }
@@ -113,7 +113,7 @@ public class Emergency {
         this.status = EmergencyStatus.CLOSED;
     }
 
-    //aggiorna lo stato dell'emergenza
+    // aggiorna lo stato dell'emergenza
     private void updateStatus() {
         int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); //calcola il numero totale di veicoli richiesti per l'emergenza
 

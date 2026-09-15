@@ -22,6 +22,31 @@
             <version>6.1.2</version>
             <scope>test</scope>
         </dependency>
+
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+            <version>5.1.5</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-web</artifactId>
+            <version>5.1.5</version>
+        </dependency>
+
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-web-client</artifactId>
+            <version>5.1.5</version>
+        </dependency>
+
+        <dependency>
+            <groupId>com.github.kevinstern</groupId>
+            <artifactId>software-and-algorithms</artifactId>
+            <version>1.0</version>
+        </dependency>
+
     </dependencies>
 
 </project>

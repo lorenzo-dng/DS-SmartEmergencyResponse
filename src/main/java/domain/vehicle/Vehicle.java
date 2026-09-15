@@ -9,6 +9,7 @@ public class Vehicle {
     private final ZoneId homeZone;
     private ZoneId currentAuthority;
     private Position position;
+    private Position destination; // null se il veicolo non è in movimento
     private VehicleStatus status;
     private double batteryLevel;
 
@@ -18,6 +19,7 @@ public class Vehicle {
         this.homeZone = homeZone;
         this.currentAuthority = homeZone;
         this.position = position;
+        this.destination = null;
         this.status = VehicleStatus.AVAILABLE;
         setBatteryLevel(batteryLevel);
     }
@@ -48,6 +50,15 @@ public class Vehicle {
 
     public void setPosition(Position position) {
         this.position = position;
+    }
+
+    public Position getDestination() {
+        return destination;
+    }
+
+    //imposta la meta verso cui il veicolo si sta dirigendo (emergenza o base)
+    public void setDestination(Position destination) {
+        this.destination = destination;
     }
 
     public VehicleStatus getStatus() {
