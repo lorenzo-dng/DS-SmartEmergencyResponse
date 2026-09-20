@@ -10,23 +10,25 @@ import domain.vehicle.VehicleStatus;
 import domain.common.VectorClock;
 import domain.utils.GeoUtils;
 import domain.utils.BipartiteMatching;
+
 import java.util.*;
 
 // stato della zona
 public class ZoneState {
 
     private static final double MILLIS_PER_MINUTE = 60_000.0;
-    private static final double AGING_SCALE_FACTOR = 1.0 / 3.0; // k, calibrato empiricamente (vedi documento)
     private static final double BATTERY_EPSILON = 1e-9;
     private static final double ID_EPSILON = 1e-15;
     private static final double REASSIGNMENT_MARGIN_MINUTES = 3.0;
     private static final double LOW_TO_MEDIUM_THRESHOLD_MIN = 15.0;
     private static final double LOW_TO_HIGH_THRESHOLD_MIN = 20.0;
     private static final double MEDIUM_TO_HIGH_THRESHOLD_MIN = 5.0;
+    private static final double INFEASIBLE_COST = 1_000_000.0; // (Double.MAX_VALUE è rischioso con l'algoritmo ungherese)
     private final Zone zone;
     private final Map<VehicleId, Vehicle> vehicles;
     private final Map<EmergencyId, Emergency> emergencies;
     private final Map<PendingReservationKey, List<VehicleId>> pendingReservations; // tiene traccia di quali veicoli il contractor ha riservato per quale emergenza cross-zona (ma non ancora assegnati)
+    private final Map<VehicleId, VehicleCategory> borrowedVehicleCategories; // veicoli presi in prestito da altre zone: (solo id e categoria noti)
     private VectorClock localClock;
 
     public ZoneState(Zone zone) {
@@ -34,6 +36,7 @@ public class ZoneState {
         this.vehicles = new HashMap<>();
         this.emergencies = new HashMap<>();
         this.pendingReservations = new HashMap<>();
+        this.borrowedVehicleCategories = new HashMap<>();
         this.localClock = new VectorClock();
     }
 
@@ -75,6 +78,11 @@ public class ZoneState {
         return available;
     }
 
+    // registra un veicolo preso in prestito da un'altra zona
+    public void addBorrowedVehicle(VehicleId vehicleId, VehicleCategory category) {
+        borrowedVehicleCategories.put(vehicleId, category);
+    }
+
     // emergenze
 
     public void addEmergency(Emergency emergency) {
@@ -102,24 +110,30 @@ public class ZoneState {
 
     // assegnazione locale
 
-    // Fase 1: minimizzazione pesata per gravità sui veicoli liberi e sugli eventi ancora scoperti
+    // (orchestrazione) gestisce le emergenze in arrivo
+    public List<VehicleCategory> handleNewEmergency(Emergency emergency) {
+        List<VehicleCategory> stillUncovered = new ArrayList<>(); // veicoli mancanti
+        for (VehicleRequirement requirement : emergency.getRequiredVehicles()) { // per ogni veicolo richiesto dall'emergenza (categoria + quantita)
+            VehicleCategory category = requirement.category();
+            assignAvailableVehicles(category); // fase 1
+            reassignEnRouteVehicles(category); // fase 2
+            if (countAssignedVehiclesOfCategory(emergency, category) < requirement.quantity()) { // se i veicoli di una categoriaassegnati all'emergenza sono minori di quelli richiesti
+                stillUncovered.add(category);
+            }
+        }
+        return stillUncovered;
+    }
 
-    // assegna i veicoli liberi alle emergenze ancora scoperte della zona
-    public void assignFreeVehicles(VehicleCategory category) {
+    // fase 1
+
+    // assegna i veicoli liberi di una categoria alle emergenze ancora scoperte della zona
+    public void assignAvailableVehicles(VehicleCategory category) {
         List<Vehicle> availableVehicles = getAvailableVehicles(category); // recupera la lista dei veicoli disponibili della categoria indicata
-
-        // ogni "slot" rappresenta una singola unità ancora mancante: un'emergenza con quantity=2
-        // per questa categoria, di cui una sola già assegnata, compare qui una sola volta (manca 1)
-        List<Emergency> slots = new ArrayList<>(); // lista di "slot" dell'emergenza, ovvero "posti" aperti per assegnare un veicolo
+        List<Emergency> slots = new ArrayList<>(); // lista di slot
         for (Emergency emergency : getOpenEmergencies()) { // per ogni emergenza aperta
-            for (VehicleRequirement requirement : emergency.getRequiredVehicles()) { // recupera i veicoli richiesti
-                if (requirement.category() == category) { // se la categoria coincide
-                    int alreadyAssigned = countAssignedVehiclesOfCategory(emergency, category); // calcola il numero di veicoli della categoria indicata che sono già stati assegnati all'emergenza
-                    int missing = requirement.quantity() - alreadyAssigned; // calcola il numero di veicoli della categoria indicata che devono essere ancora assegnati
-                    for (int i = 0; i < missing; i++) { // per ogni veicolo ancora da assegnare
-                        slots.add(emergency); // aggiunge un nuovo slot
-                    }
-                }
+            int missing = missingCount(emergency, category); // recupera il numero di veicoli della categoria indicata che devono essere ancora assegnati all'emergenza
+            for (int i = 0; i < missing; i++) { // per ogni veicolo ancora da assegnare
+                slots.add(emergency); // aggiunge un nuovo slot
             }
         }
 
@@ -130,9 +144,8 @@ public class ZoneState {
 
         double[][] costMatrix = buildCostMatrix(availableVehicles, slots, category); // costruisce una matrice dei costi associando ogni veicolo disponibile a ogni slot dell'emergenza
         int[] assignment = BipartiteMatching.solve(costMatrix); // applica l'algoritmo ungherese di minimizzazione pesata per gravita - assignment[i] indica a quale slot è stato assegnato il veicolo i (-1 se non è stato assegnato)
-
         for (int i = 0; i < assignment.length; i++) { // scorre tutto l'array
-            if (assignment[i] != -1) { // se il veicolo i è stato assegnato a uno slot
+            if (assignment[i] != -1 && costMatrix[i][assignment[i]] < INFEASIBLE_COST) { // se il veicolo i è stato assegnato a uno slot, e quello slot ha un costo accettabile
                 Vehicle vehicle = availableVehicles.get(i); // recupera il veicolo corrispondente alla riga i dalla matrice dei costi
                 Emergency emergency = slots.get(assignment[i]); // recupera lo slot (sarebbe il riferimento all'emergenza stessa) corrispondente al veicolo assegnato
                 vehicle.setStatus(VehicleStatus.EN_ROUTE); // aggiorna lo stato del veicolo assegnato
@@ -141,18 +154,34 @@ public class ZoneState {
         }
     }
 
+    // calcola quanti veicoli di una categoria mancano ancora all'emergenza
+    public int missingCount(Emergency emergency, VehicleCategory category) {
+        return requiredQuantityFor(emergency, category) - countAssignedVehiclesOfCategory(emergency, category);
+    }
+
+    // calcola quanti veicoli della categoria sono ancora necessari per la nuova emergenza
+    private int requiredQuantityFor(Emergency emergency, VehicleCategory category) {
+        for (VehicleRequirement requirement : emergency.getRequiredVehicles()) { // scorre i veicoli richiesti
+            if (requirement.category() == category) { // se la categoria coincide con quella richiesta
+                return requirement.quantity(); // restituisce la quantità
+            }
+        }
+        return 0; // altrimenti ritorna 0
+    }
+
     // conta quanti veicoli di una categoria sono stati assegnati a un'emergenza
     private int countAssignedVehiclesOfCategory(Emergency emergency, VehicleCategory category) {
         int count = 0;
-        for (VehicleId id : emergency.getAssignedVehicles()) { // scorre la lista dei veicoli assegnati
-            if (getVehicle(id).getCategory() == category) { // se la categoria corrisponde
-                count++; // incrementa il contatore
+        for (VehicleId id : emergency.getAssignedVehicles()) {
+            VehicleCategory vehicleCategory = vehicles.containsKey(id) ? getVehicle(id).getCategory() : borrowedVehicleCategories.get(id);
+            if (vehicleCategory == category) {
+                count++;
             }
         }
-        return count; // restituisce il contatore
+        return count;
     }
 
-    // costruisce la matrice dei costi che contiene il costo di ogni possibile assegnazione tra un veicolo disponibile e uno slot
+    // costruisce la matrice dei costi (viene costruita una matrice per categoria di veicoli richiesta)
     private double[][] buildCostMatrix(List<Vehicle> vehicles, List<Emergency> slots, VehicleCategory category) {
         double[][] matrix = new double[vehicles.size()][slots.size()]; // crea una matrice con una riga per ogni veicolo e una colonna per ogni slot
         for (int i = 0; i < vehicles.size(); i++) { // per ogni riga della matrice
@@ -166,94 +195,119 @@ public class ZoneState {
     // calcola il costo di assegnare un veicolo a un'emergenza
     private double computeCost(Vehicle vehicle, Emergency emergency, VehicleCategory category) {
         double distanceKm = GeoUtils.haversine(vehicle.getPosition(), emergency.getPosition()); // calcola la distanza tra la posizione del veicolo e la posizione dell'emergenza
+        if (vehicle.getBatteryLevel() < GeoUtils.estimatedBatteryConsumptionPercent(distanceKm, category)) {
+            return INFEASIBLE_COST; // batteria insufficiente per raggiungere l'emergenza (sola andata)
+        }
         double arrivalMinutes = GeoUtils.estimatedArrivalMinutes(distanceKm, category); // calcola il tempo stimato di arrivo in minuti
-        double agingMinutes = emergency.getAgingTimeMillis() / MILLIS_PER_MINUTE; // recupera i ms di aging accumulati dall'emergenza e li converte in min
-        double baseCost = arrivalMinutes / emergency.getSeverity().getWeight() - AGING_SCALE_FACTOR * agingMinutes; // calcola il costo dell'assegnazione
-
+        double baseCost = arrivalMinutes / effectiveSeverity(emergency).getWeight(); // calcola il costo dell'assegnazione
         // tie-breaker
         double batteryTerm = vehicle.getBatteryLevel() * BATTERY_EPSILON; // recupera il valore di batteria trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
         double idTerm = vehicle.getId().value().hashCode() * ID_EPSILON; // recupera il valore (numerico) dell'id trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
         return baseCost - batteryTerm - idTerm; // calcola il costo finale
     }
 
-    // Fase 2: se il nuovo evento resta scoperto per questa categoria dopo Fase 1, tenta di dirottare veicoli EN_ROUTE diretti verso eventi di gravità inferiore
-    public void reassignInTransitVehicles(Emergency newEmergency, VehicleCategory category) {
-        int missing = requiredQuantityFor(newEmergency, category) - countAssignedVehiclesOfCategory(newEmergency, category); // calcola quanti veicoli della categoria sono ancora necessari per il nuovo evento
-        for (int i = 0; i < missing; i++) { // per ogni veicolo necessario
-            Optional<Vehicle> candidate = findBestReassignmentCandidate(newEmergency, category); // cerca il miglior veicolo EN_ROUTE riassegnabile
-            if (candidate.isEmpty()) { // se non trova candidati, interrompe la riassegnazione
-                break;
-            }
-            Vehicle vehicle = candidate.get(); // recupera il veicolo trovato
-            Emergency previousEmergency = findAssignedEmergency(vehicle.getId()); // trova l'emergenza a cui il veicolo era precedentemente assegnato
-            previousEmergency.removeAssignedVehicle(vehicle.getId()); // rimuove il veicolo dalla precedente emergenza (che torna nel pool)
-            vehicle.setDestination(newEmergency.getPosition()); // imposta la posizione del nuovo evento come nuova destinazione
-            newEmergency.addAssignedVehicle(vehicle.getId()); // assegna il veicolo al nuovo evento
-        }
-    }
-
-    private int requiredQuantityFor(Emergency emergency, VehicleCategory category) {
-        for (VehicleRequirement requirement : emergency.getRequiredVehicles()) {
-            if (requirement.category() == category) {
-                return requirement.quantity();
-            }
-        }
-        return 0;
-    }
-
-    // sceglie, tra tutti i veicoli EN_ROUTE, quello con il costo più basso verso il nuovo evento
-    private Optional<Vehicle> findBestReassignmentCandidate(Emergency newEmergency, VehicleCategory category) {
-        Vehicle best = null;
-        double bestCost = Double.MAX_VALUE;
-
-        for (Vehicle vehicle : vehicles.values()) {
-            if (vehicle.getCategory() != category || vehicle.getStatus() != VehicleStatus.EN_ROUTE) {
-                continue;
-            }
-
-            double remainingKm = GeoUtils.haversine(vehicle.getPosition(), vehicle.getDestination());
-            double remainingMinutes = GeoUtils.estimatedArrivalMinutes(remainingKm, category);
-            if (remainingMinutes <= REASSIGNMENT_MARGIN_MINUTES) {
-                continue; // troppo vicino alla propria destinazione, non eleggibile
-            }
-
-            Emergency currentEmergency = findAssignedEmergency(vehicle.getId());
-            if (currentEmergency == null || effectiveSeverity(currentEmergency).getWeight() >= effectiveSeverity(newEmergency).getWeight()) {
-                continue; // gravità effettiva non strettamente inferiore, non eleggibile
-            }
-
-            double cost = computeCost(vehicle, newEmergency, category);
-            if (cost < bestCost) {
-                bestCost = cost;
-                best = vehicle;
-            }
-        }
-        return Optional.ofNullable(best);
-    }
-
-    private Emergency findAssignedEmergency(VehicleId vehicleId) {
-        for (Emergency emergency : emergencies.values()) {
-            if (emergency.getAssignedVehicles().contains(vehicleId)) {
-                return emergency;
-            }
-        }
-        return null;
-    }
-
-    // gravità effettiva a gradini: severity grezza + aging, usando le stesse soglie calibrate per k
+    // calcola la gravità effettiva dell'emergenza
     private Severity effectiveSeverity(Emergency emergency) {
-        Severity base = emergency.getSeverity();
-        double agingMinutes = emergency.getAgingTimeMillis() / MILLIS_PER_MINUTE;
+        Severity base = emergency.getSeverity(); // recupera la gravità iniziale
+        double agingMinutes = emergency.getAgingTimeMillis() / MILLIS_PER_MINUTE; // converte i ms di aging in min
 
-        if (base == Severity.LOW) {
+        if (base == Severity.LOW) { // se la gravità iniziale è LOW
             if (agingMinutes >= LOW_TO_HIGH_THRESHOLD_MIN) return Severity.HIGH;
             if (agingMinutes >= LOW_TO_MEDIUM_THRESHOLD_MIN) return Severity.MEDIUM;
             return Severity.LOW;
         }
-        if (base == Severity.MEDIUM) {
+        if (base == Severity.MEDIUM) { // se la gravità iniziale è MEDIUM
             return agingMinutes >= MEDIUM_TO_HIGH_THRESHOLD_MIN ? Severity.HIGH : Severity.MEDIUM;
         }
-        return base; // HIGH e UNCLASSIFIABLE restano invariati
+        return base; // le gravità HIGH e UNCLASSIFIABLE restano invariati
+    }
+
+    // fase 2
+
+    // riassegna i veicoli in transito
+    public void reassignEnRouteVehicles(VehicleCategory category) {
+        List<Emergency> slots = new ArrayList<>(); // lista di slot
+        for (Emergency emergency : getOpenEmergencies()) { // per ogni emergenza aperta
+            int missing = missingCount(emergency, category); // recupera il numero di veicoli della categoria indicata che devono essere ancora assegnati
+            for (int i = 0; i < missing; i++) { // per ogni veicolo ancora da assegnare
+                slots.add(emergency); // aggiunge uno slot
+            }
+        }
+
+        // se non ci sono veicoli ancora da assegnare
+        if (slots.isEmpty()) {
+            return;
+        }
+
+        List<Vehicle> candidates = new ArrayList<>(); // lista di veicoli EN_ROUTE candidati alla riassegnazione
+        List<Emergency> origins = new ArrayList<>(); // lista di emergenze dei veicoli candidati
+        for (Vehicle vehicle : vehicles.values()) { // scorre tutti i veicoli della zona
+            if (vehicle.getCategory() != category || vehicle.getStatus() != VehicleStatus.EN_ROUTE) { // filtra per categoria e stato
+                continue;
+            }
+            double remainingKm = GeoUtils.haversine(vehicle.getPosition(), vehicle.getDestination());
+            double remainingMinutes = GeoUtils.estimatedArrivalMinutes(remainingKm, category); // recupera il tempo rimanente verso la destinazione attuale
+            if (remainingMinutes <= REASSIGNMENT_MARGIN_MINUTES) { // troppo vicino per essere dirottato
+                continue;
+            }
+            Emergency currentEmergency = findAssignedEmergency(vehicle.getId()).orElseThrow(() -> new IllegalStateException("No emergency found assigned to EN_ROUTE vehicle: " + vehicle.getId().value())); // recupera l'emergenza del veicolo
+            candidates.add(vehicle); // lo aggiunge ai candidati
+            origins.add(currentEmergency); // aggiunge l'emergenza nella lista
+        }
+        if (candidates.isEmpty()) { // nessun candidato disponibile per la riassegnazione
+            return;
+        }
+
+        double[][] costMatrix = buildReassignmentCostMatrix(candidates, origins, slots, category); // costruisce la matrice dei costi di riassegnazione
+        int[] assignment = BipartiteMatching.solve(costMatrix); // applica l'algoritmo ungherese
+        for (int i = 0; i < assignment.length; i++) { // per ogni slot della matrice
+            if (assignment[i] != -1 && costMatrix[i][assignment[i]] < INFEASIBLE_COST) { // se l'assegnazione è valida (il veicolo è stato assegnato e il costo non è fuori scala)
+                Vehicle vehicle = candidates.get(i); // recupera il veicolo dalla lista dei candidati
+                Emergency previousEmergency = origins.get(i); // trova l'emergenza a cui il veicolo era precedentemente assegnato
+                Emergency newEmergency = slots.get(assignment[i]); // recupera l'emergenza da coprire
+                previousEmergency.removeAssignedVehicle(vehicle.getId()); // rimuove il veicolo dalla precedente emergenza (che torna nel pool)
+                vehicle.setDestination(newEmergency.getPosition()); // imposta la posizione della nuova emergenza come nuova destinazione
+                newEmergency.addAssignedVehicle(vehicle.getId()); // assegna il veicolo alla nuova emergenza
+            }
+        }
+    }
+
+    // trova l'emergenza attuale del veicolo
+    private Optional<Emergency> findAssignedEmergency(VehicleId vehicleId) {
+        for (Emergency emergency : emergencies.values()) { // scorre tutte le emergenze
+            if (emergency.getAssignedVehicles().contains(vehicleId)) { // se il veicolo è assegnato all'emergenza, restituisce l'emergenza
+                return Optional.of(emergency);
+            }
+        }
+        return Optional.empty();
+    }
+
+    // costruisce la matrice dei costi di riassegnazione tra candidati EN_ROUTE e slot delle emergenze scoperte (viene costruita una matrice per categoria di veicoli richiesta)
+    private double[][] buildReassignmentCostMatrix(List<Vehicle> candidates, List<Emergency> origins, List<Emergency> slots, VehicleCategory category) {
+        double[][] matrix = new double[candidates.size()][slots.size()];
+        for (int i = 0; i < candidates.size(); i++) {
+            for (int j = 0; j < slots.size(); j++) {
+                matrix[i][j] = computeReassignmentCost(candidates.get(i), origins.get(i), slots.get(j), category);
+            }
+        }
+        return matrix;
+    }
+
+    // calcola il costo di riassegnare un veicolo EN_ROUTE da un'emergenza di origine a una scoperta
+    private double computeReassignmentCost(Vehicle vehicle, Emergency currentEmergency, Emergency newEmergency, VehicleCategory category) {
+        if (effectiveSeverity(currentEmergency).getWeight() >= effectiveSeverity(newEmergency).getWeight()) { // se l'emergenza attuale del veicolo non ha gravità inferiore
+            return INFEASIBLE_COST;
+        }
+        double distanceKm = GeoUtils.haversine(vehicle.getPosition(), newEmergency.getPosition()); // recupera la distanza dalla posizione attuale del veicolo alla nuova emergenza
+        if (vehicle.getBatteryLevel() < GeoUtils.estimatedBatteryConsumptionPercent(distanceKm, category)) { // se la batteria del veicolo è insufficiente per raggiungere la nuova emergenza
+            return INFEASIBLE_COST;
+        }
+        double arrivalMinutes = GeoUtils.estimatedArrivalMinutes(distanceKm, category); // recupera il tempo stimato di arrivo in minuti
+        double baseCost = arrivalMinutes / effectiveSeverity(newEmergency).getWeight(); // recupera il costo dell'assegnazione
+        // tie-breaker
+        double batteryTerm = vehicle.getBatteryLevel() * BATTERY_EPSILON; // recupera il valore di batteria trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
+        double idTerm = vehicle.getId().value().hashCode() * ID_EPSILON; // recupera il valore (numerico) dell'id trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
+        return baseCost - batteryTerm - idTerm; // calcola il costo finale
     }
 
     // prenotazioni cross-zona

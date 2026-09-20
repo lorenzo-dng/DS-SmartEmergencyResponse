@@ -6,7 +6,6 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
-
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -43,7 +42,7 @@ public class ContractNetNodeClient {
                         .collect(Collectors.toList())); // le mette in una lista (che verra restituita con la future)
     }
 
-    // invia una richiesta (CallForProposal) a una zona vicina e restituisce il risultato (ProposalSubmission)
+    // invia una richiesta (CallForProposal) a una zona vicina e recupera la risposta (ProposalSubmission)
     private Future<Optional<ProposalSubmission>> requestProposal(ZoneId neighborId, CallForProposal cfp) {
         String address = addressResolver.apply(neighborId); // recupera l'indirizzo della zona vicina (tramite il suo id)
         return webClient.postAbs("http://" + address + "/contract-net/call-for-proposal").timeout(timeoutMs).sendJsonObject(cfp.toJson()) // invia una richiesta http POST alla zona vicina
@@ -54,7 +53,7 @@ public class ContractNetNodeClient {
                     }
                     return Future.succeededFuture(Optional.of(ProposalSubmission.fromJson(response.bodyAsJsonObject()))); // altrimenti, restituisce un optional
                 })
-                .recover(err -> { // se non riceva la risposta (o presenza di errori)
+                .recover(err -> { // se non riceve la risposta (o presenta di errori)
                     neighborHealth.markUnreachable(neighborId); // contrassegna il vicino come non raggiungibile
                     return Future.failedFuture(err);
                 });
@@ -64,7 +63,7 @@ public class ContractNetNodeClient {
     public Future<Void> sendResolution(ContractResolution resolution, ZoneId contractorId) {
         String address = addressResolver.apply(contractorId);
         return webClient.postAbs("http://" + address + "/contract-net/resolution").timeout(timeoutMs).sendJsonObject(resolution.toJson())
-                .compose(response -> {
+                .compose(aresponse -> {
                     neighborHealth.markReachable(contractorId);
                     return Future.<Void>succeededFuture();
                 })

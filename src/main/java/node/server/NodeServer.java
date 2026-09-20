@@ -13,6 +13,7 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import node.zone.ZoneState;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -38,7 +39,6 @@ public class NodeServer extends VerticleBase {
         router.route().handler(BodyHandler.create()); // necessario per poter leggere il body delle richieste POST
 
         //rotte
-
         router.get("/health").handler(ctx -> ctx.response().putHeader("content-type", "text/plain").end("OK"));
         router.post("/contract-net/call-for-proposal").handler(this::handleCallForProposal);
         router.post("/contract-net/resolution").handler(this::handleContractResolution);
@@ -49,32 +49,33 @@ public class NodeServer extends VerticleBase {
                 .onFailure(err -> System.err.println("Failed to start HTTP server: " + err.getMessage()));
     }
 
-    // gestisce una CallForProposal ricevuta da un vicino: cerca il veicolo disponibile più vicino della categoria richiesta, lo prenota temporaneamente e risponde con una ProposalSubmission;
-    // se non ha veicoli disponibili risponde 204
+    // gestisce una CallForProposal ricevuta da un initiator: cerca il veicolo disponibile più vicino della categoria richiesta, lo prenota temporaneamente e risponde con una ProposalSubmission
     private void handleCallForProposal(RoutingContext ctx) {
         CallForProposal cfp = CallForProposal.fromJson(ctx.body().asJsonObject()); // legge il body della richiesta HTTP (arrivato come JSON)
         List<Vehicle> available = zoneState.getAvailableVehicles(cfp.requiredVehicleCategory()); // recupera dalla propria zona tutti i veicoli AVAILABLE della categoria richiesta
-        available.sort(Comparator.comparingDouble(v -> GeoUtils.haversine(v.getPosition(), cfp.eventPosition()))); // ordina la lista per distanza crescente (in km) dalla posizione dell'evento:
-        List<Vehicle> selected = available.stream().limit(cfp.requiredCount()).toList(); // dalla lista ordinata, prende i veicoli nel numero richiesto
-
+        int availableFleetCount = available.size(); // conta la flotta disponibile totale per questa categoria
+        List<Vehicle> feasible = available.stream().filter(v -> { // esclude i veicoli che non hanno abbastanza batteria per raggiungere l'emergenza (sola andata)
+            double distance = GeoUtils.haversine(v.getPosition(), cfp.eventPosition());
+            return v.getBatteryLevel() >= GeoUtils.estimatedBatteryConsumptionPercent(distance, cfp.requiredVehicleCategory());
+        }).sorted(Comparator.comparingDouble((Vehicle v) -> GeoUtils.haversine(v.getPosition(), cfp.eventPosition())) // ordina la lista per distanza crescente (in km) dalla posizione dell'evento
+                .thenComparing(Comparator.comparingDouble(Vehicle::getBatteryLevel).reversed()) // a parità di distanza (stesso nodo): criterio secondario, maggiore batteria residua
+                .thenComparingInt(v -> v.getId().value().hashCode())).toList(); // tie-breaker finale in caso di parità totale
+        List<Vehicle> selected = feasible.stream().limit(cfp.requiredCount()).toList(); // dalla lista ordinata, prende i veicoli nel numero richiesto
         if (selected.isEmpty()) { // se non è stato trovato nessun veicolo
-            ctx.response().setStatusCode(204).end();  //indica "la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta" (il contractor non risponde)
+            ctx.response().setStatusCode(204).end(); // indica che la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta (il contractor non risponde)
             return;
         }
-
         List<VehicleOffer> offers = new ArrayList<>();
         List<VehicleId> reservedIds = new ArrayList<>();
         for (Vehicle vehicle : selected) { // per ogni veicolo della lista ottenuta
             vehicle.setStatus(VehicleStatus.RESERVED); // lo imposta come RESERVED
-            double distance = GeoUtils.haversine(vehicle.getPosition(), cfp.eventPosition()); // calcola la posizione rispetto all'evento
-            offers.add(new VehicleOffer(vehicle.getId(), distance)); // aggiunge informazioni (id veicolo + posizione) a una lista
-            reservedIds.add(vehicle.getId()); // aggiunge l'id del veicolo alla lista dedicata (utile per prenotazione interna)
+            double distance = GeoUtils.haversine(vehicle.getPosition(), cfp.eventPosition()); // calcola la distanza rispetto all'emergenza
+            offers.add(new VehicleOffer(vehicle.getId(), distance, vehicle.getBatteryLevel())); // aggiunge informazioni (id veicolo + distanza + batteria) a una lista
+            reservedIds.add(vehicle.getId()); // aggiunge l'id del veicolo alla lista dedicata
         }
-
         zoneState.addPendingReservation(cfp.emergencyId(), cfp.requiredVehicleCategory(), reservedIds); // aggiunge il veicolo alla lista dei veicoli riservati
         scheduleReservationTimeout(cfp.emergencyId(), cfp.requiredVehicleCategory()); // avvia il timer di sicurezza
-
-        ProposalSubmission proposal = new ProposalSubmission(cfp.emergencyId(), cfp.requiredVehicleCategory(), zoneState.getZoneId(), offers);
+        ProposalSubmission proposal = new ProposalSubmission(cfp.emergencyId(), cfp.requiredVehicleCategory(), zoneState.getZoneId(), offers, availableFleetCount);
         ctx.response().putHeader("content-type", "application/json").end(proposal.toJson().encode()); // invia un ProposalSubmission
     }
 

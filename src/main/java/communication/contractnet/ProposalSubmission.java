@@ -8,8 +8,8 @@ import io.vertx.core.json.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
 
-// contractor -> initiator: distanza del veicolo più vicino disponibile, con prenotazione temporanea
-public record ProposalSubmission(EmergencyId emergencyId, VehicleCategory category, ZoneId contractorZoneId, List<VehicleOffer> vehicleOffers) {
+// contractor -> initiator: veicolo più vicino disponibile, con prenotazione temporanea
+public record ProposalSubmission(EmergencyId emergencyId, VehicleCategory category, ZoneId contractorZoneId, List<VehicleOffer> vehicleOffers, int availableFleetCount) {
 
     // serve ai contractor per inviare una risposta all' initiator
     public JsonObject toJson() {
@@ -21,7 +21,9 @@ public record ProposalSubmission(EmergencyId emergencyId, VehicleCategory catego
                 .put("emergencyId", emergencyId.value())
                 .put("category", category.name())
                 .put("contractorZoneId", contractorZoneId.value())
-                .put("vehicleOffers", offersJson);
+                .put("vehicleOffers", offersJson)
+                .put("availableFleetCount", availableFleetCount);
+
     }
 
     // serve all' initiator per ricevere il messaggio json
@@ -34,6 +36,8 @@ public record ProposalSubmission(EmergencyId emergencyId, VehicleCategory catego
         return new ProposalSubmission(
                 new EmergencyId(json.getString("emergencyId")),
                 VehicleCategory.valueOf(json.getString("category")),
-                new ZoneId(json.getString("contractorZoneId")), vehicleOffers);
+                new ZoneId(json.getString("contractorZoneId")),
+                vehicleOffers,
+                json.getInteger("availableFleetCount"));
     }
 }
