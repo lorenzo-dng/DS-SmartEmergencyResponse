@@ -1,7 +1,10 @@
 package node.server;
 
 import communication.contractnet.*;
+import domain.common.Position;
+import domain.emergency.Emergency;
 import domain.emergency.EmergencyId;
+import domain.emergency.EmergencyStatus;
 import domain.utils.GeoUtils;
 import domain.vehicle.Vehicle;
 import domain.vehicle.VehicleCategory;
@@ -42,6 +45,7 @@ public class NodeServer extends VerticleBase {
         router.get("/health").handler(ctx -> ctx.response().putHeader("content-type", "text/plain").end("OK"));
         router.post("/contract-net/call-for-proposal").handler(this::handleCallForProposal);
         router.post("/contract-net/resolution").handler(this::handleContractResolution);
+        router.post("/contract-net/intervention-completed").handler(this::handleInterventionCompleted);
 
         // crea e avvia il server http vertx in ascolto sulla porta indicata
         return vertx.createHttpServer().requestHandler(router).listen(port)
@@ -55,9 +59,11 @@ public class NodeServer extends VerticleBase {
         List<Vehicle> available = zoneState.getAvailableVehicles(cfp.requiredVehicleCategory()); // recupera dalla propria zona tutti i veicoli AVAILABLE della categoria richiesta
         int availableFleetCount = available.size(); // conta la flotta disponibile totale per questa categoria
         List<Vehicle> feasible = available.stream().filter(v -> { // esclude i veicoli che non hanno abbastanza batteria per raggiungere l'emergenza (sola andata)
-            double distance = GeoUtils.haversine(v.getPosition(), cfp.eventPosition());
-            return v.getBatteryLevel() >= GeoUtils.estimatedBatteryConsumptionPercent(distance, cfp.requiredVehicleCategory());
-        }).sorted(Comparator.comparingDouble((Vehicle v) -> GeoUtils.haversine(v.getPosition(), cfp.eventPosition())) // ordina la lista per distanza crescente (in km) dalla posizione dell'evento
+            double distance = GeoUtils.haversine(v.getPosition(), cfp.emergencyPosition());
+            boolean batteryOk = v.getBatteryLevel() >= GeoUtils.estimatedBatteryConsumptionPercent(distance, cfp.requiredVehicleCategory());
+            boolean distanceOk = !cfp.strictDistanceLimit() || GeoUtils.estimatedArrivalMinutes(distance, cfp.requiredVehicleCategory()) <= ZoneState.TOO_FAR_THRESHOLD_MIN;
+            return batteryOk && distanceOk;
+        }).sorted(Comparator.comparingDouble((Vehicle v) -> GeoUtils.haversine(v.getPosition(), cfp.emergencyPosition())) // ordina la lista per distanza crescente (in km) dalla posizione dell'emergenza
                 .thenComparing(Comparator.comparingDouble(Vehicle::getBatteryLevel).reversed()) // a parità di distanza (stesso nodo): criterio secondario, maggiore batteria residua
                 .thenComparingInt(v -> v.getId().value().hashCode())).toList(); // tie-breaker finale in caso di parità totale
         List<Vehicle> selected = feasible.stream().limit(cfp.requiredCount()).toList(); // dalla lista ordinata, prende i veicoli nel numero richiesto
@@ -69,11 +75,12 @@ public class NodeServer extends VerticleBase {
         List<VehicleId> reservedIds = new ArrayList<>();
         for (Vehicle vehicle : selected) { // per ogni veicolo della lista ottenuta
             vehicle.setStatus(VehicleStatus.RESERVED); // lo imposta come RESERVED
-            double distance = GeoUtils.haversine(vehicle.getPosition(), cfp.eventPosition()); // calcola la distanza rispetto all'emergenza
+            double distance = GeoUtils.haversine(vehicle.getPosition(), cfp.emergencyPosition()); // calcola la distanza rispetto all'emergenza
             offers.add(new VehicleOffer(vehicle.getId(), distance, vehicle.getBatteryLevel())); // aggiunge informazioni (id veicolo + distanza + batteria) a una lista
             reservedIds.add(vehicle.getId()); // aggiunge l'id del veicolo alla lista dedicata
         }
         zoneState.addPendingReservation(cfp.emergencyId(), cfp.requiredVehicleCategory(), reservedIds); // aggiunge il veicolo alla lista dei veicoli riservati
+        zoneState.storeEmergencyPosition(cfp.emergencyId(), cfp.requiredVehicleCategory(), cfp.emergencyPosition()); // memorizza la posizione dell'emergenza (utile per handleContractResolution)
         scheduleReservationTimeout(cfp.emergencyId(), cfp.requiredVehicleCategory()); // avvia il timer di sicurezza
         ProposalSubmission proposal = new ProposalSubmission(cfp.emergencyId(), cfp.requiredVehicleCategory(), zoneState.getZoneId(), offers, availableFleetCount);
         ctx.response().putHeader("content-type", "application/json").end(proposal.toJson().encode()); // invia un ProposalSubmission
@@ -83,6 +90,7 @@ public class NodeServer extends VerticleBase {
     private void scheduleReservationTimeout(EmergencyId emergencyId, VehicleCategory category) {
         vertx.setTimer(reservationTimeoutMs, timerId -> { // se il timer è trascorso
             Optional<List<VehicleId>> timedOut = zoneState.removePendingReservation(emergencyId, category); // rimuove i veicoli prenotati (se non gia rimossi da un ContractResolution precedente)
+            zoneState.removeEmergencyPosition(emergencyId, category);
             timedOut.ifPresent(vehicleIds -> { // se esistevano veicoli riservati
                 for (VehicleId vehicleId : vehicleIds) { // scorre tutti i veicoli (di una specifica categoria) che erano riservati per questa emergenza
                     zoneState.getVehicle(vehicleId).setStatus(VehicleStatus.AVAILABLE); // li libera
@@ -96,14 +104,32 @@ public class NodeServer extends VerticleBase {
     private void handleContractResolution(RoutingContext ctx) {
         ContractResolution resolution = ContractResolution.fromJson(ctx.body().asJsonObject());
         Optional<List<VehicleId>> allReserved = zoneState.removePendingReservation(resolution.emergencyId(), resolution.category()); // recupera tutti i veicoli riservati per questa negoziazione (se esistono, ovvero se l'initiator comunica entro il timer)
+        Optional<Position> emergencyPosition = zoneState.removeEmergencyPosition(resolution.emergencyId(), resolution.category());
         allReserved.ifPresentOrElse(reservedIds -> { // se sono presenti
                     for (VehicleId vehicleId : reservedIds) { // per ogni veicolo
-                        VehicleStatus newStatus = resolution.confirmedVehicleIds().contains(vehicleId) ? VehicleStatus.EN_ROUTE : VehicleStatus.AVAILABLE; // assegna il veicoli se confermato, libera se non confermato
-                        zoneState.getVehicle(vehicleId).setStatus(newStatus); // aggiorna lo stato del veicolo
+                        Vehicle vehicle = zoneState.getVehicle(vehicleId);
+                        if (resolution.confirmedVehicleIds().contains(vehicleId)) { // se il veicolo è stato confermato
+                            vehicle.setStatus(VehicleStatus.EN_ROUTE);
+                            vehicle.setDestination(emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value())));
+                            zoneState.addActiveLoan(vehicleId, resolution.emergencyId(), resolution.requesterZoneId(), resolution.category()); // salva l'attivazione del prestito
+                        } else { // se il veicolo non è stato confermato
+                            vehicle.setStatus(VehicleStatus.AVAILABLE);
+                        }
                     }
                 },
                 () -> System.out.println("ContractResolution arrived too late for emergency " + resolution.emergencyId().value() + " (" + resolution.category() + "): reservation already timed out") // se è scaduto il timer
         );
         ctx.response().setStatusCode(204).end(); //indica "la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta" (il contractor non risponde)
+    }
+
+    // gestisce la ricezione della notifica di completamento del veicolo prestato da parte del contractor
+    private void handleInterventionCompleted(RoutingContext ctx) {
+        InterventionCompleted notification = InterventionCompleted.fromJson(ctx.body().asJsonObject());
+        Emergency emergency = zoneState.getEmergency(notification.emergencyId()); // recupera l'id dell'emergenza
+        if (emergency.getStatus() != EmergencyStatus.CLOSED) { // se l'emergenza è ancora aperta
+            emergency.markVehicleCompleted(notification.vehicleId()); // segna che il veicolo ha completato l'intervento sull'emergenza
+        }
+        zoneState.removeBorrowedVehicle(notification.vehicleId());
+        ctx.response().setStatusCode(200).end();
     }
 }

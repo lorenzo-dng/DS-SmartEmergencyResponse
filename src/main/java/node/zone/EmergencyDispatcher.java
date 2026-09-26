@@ -2,11 +2,11 @@ package node.zone;
 
 import communication.contractnet.*;
 import domain.emergency.Emergency;
+import domain.emergency.Severity;
 import domain.vehicle.VehicleCategory;
 import domain.vehicle.VehicleId;
 import domain.zone.ZoneId;
 import io.vertx.core.Future;
-
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -40,7 +40,8 @@ public class EmergencyDispatcher {
             return Future.succeededFuture();
         }
         // altrimenti, esegue una richiesta cross-zona ai vicini
-        CallForProposal cfp = new CallForProposal(emergency.getId(), zoneState.getZoneId(), emergency.getPosition(), category, missing);
+        boolean isHigh = emergency.getSeverity().effectiveSeverity(emergency.getAgingTimeMillis()) == Severity.HIGH;
+        CallForProposal cfp = new CallForProposal(emergency.getId(), zoneState.getZoneId(), emergency.getPosition(), category, missing, isHigh);
         return contractNetClient.callForProposals(cfp, neighbors).compose(submissions -> resolveAndConfirm(emergency, category, submissions)); // recupera tutte le risposte e le risolve
     }
 
@@ -48,9 +49,9 @@ public class EmergencyDispatcher {
     private Future<Void> resolveAndConfirm(Emergency emergency, VehicleCategory category, List<ProposalSubmission> submissions) {
         int stillMissing = zoneState.missingCount(emergency, category); // ricontrolla il numero di veicoli di una categoria ancora da assegnare (potrebbe essere cambiato nel frattempo)
         Set<VehicleId> selectedIds = new HashSet<>();
-        if (stillMissing > 0 && !submissions.isEmpty()) { // se ci sono ancora veicoli du una categoria ancora da assegnare
+        if (stillMissing > 0 && !submissions.isEmpty()) { // se ci sono ancora veicoli di una categoria ancora da assegnare
             List<FlatOffer> flatOffers = getFlatOffers(submissions); // recupera le proposte di veicoli ricevute dai vicini
-            flatOffers.sort(Comparator.comparingDouble(FlatOffer::distanceKm) // criterio primario: ordina i veicoli in bsae alla distanza dall'emergenza
+            flatOffers.sort(Comparator.comparingDouble(FlatOffer::distanceKm) // criterio primario: ordina i veicoli in base alla distanza dall'emergenza
                     .thenComparing(Comparator.comparingInt(FlatOffer::availableFleetCount).reversed()) // a parità: ordina i veicoli in base alla maggiore disponibilita di flotta del contractor per quella categoria
                     .thenComparing(Comparator.comparingDouble(FlatOffer::batteryLevel).reversed()) // a parità: ordina i veicoli in base alla maggiore batteria residua
                     .thenComparingInt(offer -> offer.vehicleId().value().hashCode()) // tie-breaker finale
@@ -62,6 +63,7 @@ public class EmergencyDispatcher {
                 selectedIds.add(offer.vehicleId()); // aggiunge l'id del veicolo nella lista dedicata
             }
         }
+        zoneState.resolveVehicleBackup(emergency.getId(), category, selectedIds.size()); // attiva o rilascia l'eventuale veicolo di backup
         return sendResolutionsToAll(emergency, category, submissions, selectedIds);
     }
 

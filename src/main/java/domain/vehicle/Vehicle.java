@@ -7,6 +7,7 @@ public class Vehicle {
     private final VehicleId id;
     private final VehicleCategory category;
     private final ZoneId homeZone;
+    private final Position basePosition;
     private ZoneId currentAuthority;
     private Position position;
     private Position destination; // null se il veicolo non è in movimento
@@ -17,6 +18,7 @@ public class Vehicle {
         this.id = id;
         this.category = category;
         this.homeZone = homeZone;
+        this.basePosition = position; // la posizione di partenza al caricamento è la base del veicolo
         this.currentAuthority = homeZone;
         this.position = position;
         this.destination = null;
@@ -34,6 +36,10 @@ public class Vehicle {
 
     public ZoneId getHomeZone() {
         return homeZone;
+    }
+
+    public Position getBasePosition() {
+        return basePosition;
     }
 
     public ZoneId getCurrentAuthority() {

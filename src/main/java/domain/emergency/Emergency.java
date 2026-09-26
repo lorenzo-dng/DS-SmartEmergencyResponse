@@ -19,6 +19,7 @@ public class Emergency {
     private final List<VehicleId> assignedVehicles;
     private long agingTimeMillis;
     private EmergencyStatus status;
+    private int completedVehicleCount; // veicoli che hanno completato l'intervento sull'emergenza
 
     public Emergency(EmergencyId id, EmergencyType type, Position position, ZoneId zone, Instant localTimestamp) {
         this.id = id;
@@ -30,6 +31,7 @@ public class Emergency {
         this.assignedVehicles = new ArrayList<>();
         this.agingTimeMillis = 0;
         this.status = EmergencyStatus.QUEUED;
+        this.completedVehicleCount = 0;
     }
 
     public EmergencyId getId() {
@@ -97,6 +99,21 @@ public class Emergency {
         updateStatus();
     }
 
+    // rimuove il veicolo che ha completato l'emergenza e chiude l'emergenza se tutti i veicoli richiesti hanno terminato l'intervento
+    public void markVehicleCompleted(VehicleId vehicleId) {
+        if (this.status == EmergencyStatus.CLOSED) {
+            throw new IllegalStateException("Cannot complete vehicle for a closed emergency: " + id);
+        }
+        if (assignedVehicles.remove(vehicleId)) {
+            completedVehicleCount++;
+        }
+        if (isFullyServed()) {
+            this.status = EmergencyStatus.CLOSED;
+        } else {
+            updateStatus();
+        }
+    }
+
     public long getAgingTimeMillis() {
         return agingTimeMillis;
     }
@@ -115,14 +132,20 @@ public class Emergency {
 
     // aggiorna lo stato dell'emergenza
     private void updateStatus() {
-        int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); //calcola il numero totale di veicoli richiesti per l'emergenza
+        int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); // recupera il numero totale di veicoli richiesti per l'emergenza
 
-        if (assignedVehicles.isEmpty()) { //se non sono stati assegnati veicoli all'emergenza
+        if (assignedVehicles.isEmpty()) { // se non sono stati assegnati veicoli all'emergenza
             this.status = EmergencyStatus.QUEUED;
-        } else if (assignedVehicles.size() < totalRequired) { //se sono stati assegnati solo alcuni veicoli all'emergenza
+        } else if (assignedVehicles.size() < totalRequired) { // se sono stati assegnati solo alcuni veicoli all'emergenza
             this.status = EmergencyStatus.PARTIALLY_ASSIGNED;
         } else {
             this.status = EmergencyStatus.ASSIGNED;
         }
+    }
+
+    // verifica se tutti i veicoli richiesti hanno completato il proprio intervento
+    private boolean isFullyServed() {
+        int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); // recupera il numero totale di veicoli richiesti per l'emergenza
+        return completedVehicleCount >= totalRequired;
     }
 }

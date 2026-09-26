@@ -8,8 +8,13 @@ import io.vertx.core.Vertx;
 import node.config.NodeConfig;
 import node.server.NodeServer;
 import node.topology.ZoneGridFactory;
+import node.vehicle.VehicleLifecycleManager;
 import node.vehicle.VehiclePopulator;
+import node.zone.InterventionNotifier;
+import node.zone.LoanRepository;
+import node.zone.PendingLoan;
 import node.zone.ZoneState;
+
 import java.nio.file.Path;
 import java.util.Map;
 
@@ -24,7 +29,8 @@ public class Main {
         if (myZone == null) {
             throw new IllegalStateException("Zone not found in computed grid: " + myZoneId);
         }
-        ZoneState zoneState = new ZoneState(myZone); //inizializza lo stato della zona
+        LoanRepository loanRepository = new LoanRepository(config.pendingLoansDbPath()); // inizializza il repository dei prestiti cross-zona
+        ZoneState zoneState = new ZoneState(myZone, loanRepository); //inizializza lo stato della zona
         VehiclePopulator.populate(zoneState, Path.of(config.vehiclesConfigPath())); // popola i veicoli iniziali della zona
 
         Vertx vertx = Vertx.vertx();
@@ -34,6 +40,13 @@ public class Main {
                     NeighborHealth neighborHealth = new NeighborHealth(myZone.getNeighbors());
                     ContractNetNodeClient contractNetClient = new ContractNetNodeClient(vertx, config::addressFor, neighborHealth, config.neighborTimeoutMs());
                     // TODO: usare contractNetClient.callForProposals(...) nella logica di gestione emergenze quando un evento resta senza veicolo locale disponibile
+                    InterventionNotifier interventionNotifier = new InterventionNotifier(vertx, config::addressFor, zoneState, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
+                    VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, interventionNotifier);
+                    for (PendingLoan loan : zoneState.loadPendingLoans()) { // ogni volta che il nodo si riavvia dopo il crash, recupera dal db i prestiti in sospeso
+                        interventionNotifier.notifyCompletion(loan.emergencyId(), loan.requesterZoneId(), loan.vehicleId(), loan.category()); // notifica all'initiator il completamento dell'intervento del veicolo sull'emergenza
+                    }
+
+                    lifecycleManager.start(); // avvia il ciclo di vita dei veicoli (posizione, arrivo, intervento, ritorno)
                 })
                 .onFailure(err -> { // se ha fallito
                     System.err.println("Node failed to start: " + err.getMessage());

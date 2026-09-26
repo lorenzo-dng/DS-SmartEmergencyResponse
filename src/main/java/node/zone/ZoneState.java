@@ -1,5 +1,6 @@
 package node.zone;
 
+import domain.common.Position;
 import domain.emergency.*;
 import domain.zone.Zone;
 import domain.zone.ZoneId;
@@ -16,28 +17,33 @@ import java.util.*;
 // stato della zona
 public class ZoneState {
 
-    private static final double MILLIS_PER_MINUTE = 60_000.0;
+    public static final double TOO_FAR_THRESHOLD_MIN = 10.0;
+    private static final double REASSIGNMENT_MARGIN_MINUTES = 3.0;
     private static final double BATTERY_EPSILON = 1e-9;
     private static final double ID_EPSILON = 1e-15;
-    private static final double REASSIGNMENT_MARGIN_MINUTES = 3.0;
-    private static final double LOW_TO_MEDIUM_THRESHOLD_MIN = 15.0;
-    private static final double LOW_TO_HIGH_THRESHOLD_MIN = 20.0;
-    private static final double MEDIUM_TO_HIGH_THRESHOLD_MIN = 5.0;
-    private static final double INFEASIBLE_COST = 1_000_000.0; // (Double.MAX_VALUE è rischioso con l'algoritmo ungherese)
-    private final Zone zone;
+    private static final double INFEASIBLE_COST = 1_000_000.0; // Double.MAX_VALUE è rischioso con l'algoritmo ungherese
     private final Map<VehicleId, Vehicle> vehicles;
     private final Map<EmergencyId, Emergency> emergencies;
-    private final Map<PendingReservationKey, List<VehicleId>> pendingReservations; // tiene traccia di quali veicoli il contractor ha riservato per quale emergenza cross-zona (ma non ancora assegnati)
-    private final Map<VehicleId, VehicleCategory> borrowedVehicleCategories; // veicoli presi in prestito da altre zone: (solo id e categoria noti)
+    private final Map<PendingReservationKey, List<VehicleId>> pendingReservations;
+    private final Map<PendingReservationKey, List<VehicleId>> vehicleBackupReservations;
+    private final Map<VehicleId, VehicleCategory> borrowedVehicleCategories;
+    private final Map<PendingReservationKey, Position> pendingEmergencyPositions;
+    private final Map<VehicleId, ActiveLoan> activeLoans;
+    private final LoanRepository loanRepository;
+    private final Zone zone;
     private VectorClock localClock;
 
-    public ZoneState(Zone zone) {
+    public ZoneState(Zone zone, LoanRepository loanRepository) {
         this.zone = zone;
         this.vehicles = new HashMap<>();
         this.emergencies = new HashMap<>();
         this.pendingReservations = new HashMap<>();
+        this.pendingEmergencyPositions = new HashMap<>();
         this.borrowedVehicleCategories = new HashMap<>();
+        this.activeLoans = new HashMap<>();
         this.localClock = new VectorClock();
+        this.vehicleBackupReservations = new HashMap<>();
+        this.loanRepository = loanRepository;
     }
 
     public ZoneId getZoneId() {
@@ -83,6 +89,11 @@ public class ZoneState {
         borrowedVehicleCategories.put(vehicleId, category);
     }
 
+    // rimuove un veicolo preso in prestito da un'altra zona
+    public void removeBorrowedVehicle(VehicleId vehicleId) {
+        borrowedVehicleCategories.remove(vehicleId);
+    }
+
     // emergenze
 
     public void addEmergency(Emergency emergency) {
@@ -117,7 +128,8 @@ public class ZoneState {
             VehicleCategory category = requirement.category();
             assignAvailableVehicles(category); // fase 1
             reassignEnRouteVehicles(category); // fase 2
-            if (countAssignedVehiclesOfCategory(emergency, category) < requirement.quantity()) { // se i veicoli di una categoriaassegnati all'emergenza sono minori di quelli richiesti
+            releaseBackupIfCovered(emergency, category); // libera il veicolo di backup se il dirottamento ha già coperto lo slot
+            if (countAssignedVehiclesOfCategory(emergency, category) < requirement.quantity()) { // se i veicoli di una categoria assegnati all'emergenza sono minori di quelli richiesti
                 stillUncovered.add(category);
             }
         }
@@ -131,7 +143,7 @@ public class ZoneState {
         List<Vehicle> availableVehicles = getAvailableVehicles(category); // recupera la lista dei veicoli disponibili della categoria indicata
         List<Emergency> slots = new ArrayList<>(); // lista di slot
         for (Emergency emergency : getOpenEmergencies()) { // per ogni emergenza aperta
-            int missing = missingCount(emergency, category); // recupera il numero di veicoli della categoria indicata che devono essere ancora assegnati all'emergenza
+            int missing = missingCount(emergency, category); // recupera il numero di veicoli della categoria indicata che devono essere ancora assegnati
             for (int i = 0; i < missing; i++) { // per ogni veicolo ancora da assegnare
                 slots.add(emergency); // aggiunge un nuovo slot
             }
@@ -143,13 +155,22 @@ public class ZoneState {
         }
 
         double[][] costMatrix = buildCostMatrix(availableVehicles, slots, category); // costruisce una matrice dei costi associando ogni veicolo disponibile a ogni slot dell'emergenza
-        int[] assignment = BipartiteMatching.solve(costMatrix); // applica l'algoritmo ungherese di minimizzazione pesata per gravita - assignment[i] indica a quale slot è stato assegnato il veicolo i (-1 se non è stato assegnato)
+        int[] assignment = BipartiteMatching.solve(costMatrix); // applica l'algoritmo ungherese di minimizzazione pesata per gravita
         for (int i = 0; i < assignment.length; i++) { // scorre tutto l'array
             if (assignment[i] != -1 && costMatrix[i][assignment[i]] < INFEASIBLE_COST) { // se il veicolo i è stato assegnato a uno slot, e quello slot ha un costo accettabile
                 Vehicle vehicle = availableVehicles.get(i); // recupera il veicolo corrispondente alla riga i dalla matrice dei costi
                 Emergency emergency = slots.get(assignment[i]); // recupera lo slot (sarebbe il riferimento all'emergenza stessa) corrispondente al veicolo assegnato
-                vehicle.setStatus(VehicleStatus.EN_ROUTE); // aggiorna lo stato del veicolo assegnato
-                emergency.addAssignedVehicle(vehicle.getId()); // aggiunge il veicolo alla lista dei veicoli assegnati
+                double distanceKm = GeoUtils.haversine(vehicle.getPosition(), emergency.getPosition());
+                double arrivalMinutes = GeoUtils.estimatedArrivalMinutes(distanceKm, category);
+                if (effectiveSeverity(emergency) == Severity.HIGH && arrivalMinutes > TOO_FAR_THRESHOLD_MIN) { // troppo lontano per un'emergenza ad alta gravità: tenuto come piano B, si tenta prima la fase 3
+                    vehicle.setStatus(VehicleStatus.RESERVED);
+                    // ricordando che a una stessa emergenza possono essere associati piu veicoli di una stessa categoria: crea la coppia (chiave - lista) se non esiste gia, altrimenti se la chiave esiste gia, restituisce la lista. Successivamente aggiunge il veicolo
+                    vehicleBackupReservations.computeIfAbsent(new PendingReservationKey(emergency.getId(), category), k -> new ArrayList<>()).add(vehicle.getId());
+                } else {
+                    vehicle.setStatus(VehicleStatus.EN_ROUTE);
+                    vehicle.setDestination(emergency.getPosition());
+                    emergency.addAssignedVehicle(vehicle.getId());
+                }
             }
         }
     }
@@ -208,18 +229,7 @@ public class ZoneState {
 
     // calcola la gravità effettiva dell'emergenza
     private Severity effectiveSeverity(Emergency emergency) {
-        Severity base = emergency.getSeverity(); // recupera la gravità iniziale
-        double agingMinutes = emergency.getAgingTimeMillis() / MILLIS_PER_MINUTE; // converte i ms di aging in min
-
-        if (base == Severity.LOW) { // se la gravità iniziale è LOW
-            if (agingMinutes >= LOW_TO_HIGH_THRESHOLD_MIN) return Severity.HIGH;
-            if (agingMinutes >= LOW_TO_MEDIUM_THRESHOLD_MIN) return Severity.MEDIUM;
-            return Severity.LOW;
-        }
-        if (base == Severity.MEDIUM) { // se la gravità iniziale è MEDIUM
-            return agingMinutes >= MEDIUM_TO_HIGH_THRESHOLD_MIN ? Severity.HIGH : Severity.MEDIUM;
-        }
-        return base; // le gravità HIGH e UNCLASSIFIABLE restano invariati
+        return emergency.getSeverity().effectiveSeverity(emergency.getAgingTimeMillis());
     }
 
     // fase 2
@@ -243,6 +253,9 @@ public class ZoneState {
         List<Emergency> origins = new ArrayList<>(); // lista di emergenze dei veicoli candidati
         for (Vehicle vehicle : vehicles.values()) { // scorre tutti i veicoli della zona
             if (vehicle.getCategory() != category || vehicle.getStatus() != VehicleStatus.EN_ROUTE) { // filtra per categoria e stato
+                continue;
+            }
+            if (activeLoans.containsKey(vehicle.getId())) { // se il veicolo è stato prestato
                 continue;
             }
             double remainingKm = GeoUtils.haversine(vehicle.getPosition(), vehicle.getDestination());
@@ -273,7 +286,7 @@ public class ZoneState {
     }
 
     // trova l'emergenza attuale del veicolo
-    private Optional<Emergency> findAssignedEmergency(VehicleId vehicleId) {
+    public Optional<Emergency> findAssignedEmergency(VehicleId vehicleId) {
         for (Emergency emergency : emergencies.values()) { // scorre tutte le emergenze
             if (emergency.getAssignedVehicles().contains(vehicleId)) { // se il veicolo è assegnato all'emergenza, restituisce l'emergenza
                 return Optional.of(emergency);
@@ -303,11 +316,50 @@ public class ZoneState {
             return INFEASIBLE_COST;
         }
         double arrivalMinutes = GeoUtils.estimatedArrivalMinutes(distanceKm, category); // recupera il tempo stimato di arrivo in minuti
+        if (effectiveSeverity(newEmergency) == Severity.HIGH && arrivalMinutes > TOO_FAR_THRESHOLD_MIN) { // dirottamento verso HIGH consentito solo entro la soglia di 10 min
+            return INFEASIBLE_COST;
+        }
+
         double baseCost = arrivalMinutes / effectiveSeverity(newEmergency).getWeight(); // recupera il costo dell'assegnazione
         // tie-breaker
         double batteryTerm = vehicle.getBatteryLevel() * BATTERY_EPSILON; // recupera il valore di batteria trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
         double idTerm = vehicle.getId().value().hashCode() * ID_EPSILON; // recupera il valore (numerico) dell'id trasformandolo in una quantità piccolissima (necessario per evitare un numero troppo grande, che avrebbe molta influenza nel calcolo finale)
         return baseCost - batteryTerm - idTerm; // calcola il costo finale
+    }
+
+    // rilascia il veicolo di backup se l'emergenza è stata coperta mentre un veicolo era tenuto come piano B (es. da un dirottamento di fase 2)
+    private void releaseBackupIfCovered(Emergency emergency, VehicleCategory category) {
+        List<VehicleId> backup = vehicleBackupReservations.remove(new PendingReservationKey(emergency.getId(), category)); // recupera la lista dei veicoli di backup di una categoria
+        if (backup == null) { // nessun veicolo di backup esistente di quella categoria
+            return;
+        }
+        if (countAssignedVehiclesOfCategory(emergency, category) >= requiredQuantityFor(emergency, category)) { // veicoli già assegnati all'emergenza
+            for (VehicleId vehicleId : backup) { // per ogni veicolo di backup di una categoria
+                getVehicle(vehicleId).setStatus(VehicleStatus.AVAILABLE); // libera il veicolo
+            }
+        } else {
+            vehicleBackupReservations.put(new PendingReservationKey(emergency.getId(), category), backup); // altrimenti li rimette
+        }
+    }
+
+    // risolve l'eventuale backup locale dopo l'esito della fase 3: attiva i veicoli di riserva ancora necessari, rilascia gli altri
+    public void resolveVehicleBackup(EmergencyId emergencyId, VehicleCategory category, int remoteConfirmedCount) {
+        List<VehicleId> backup = vehicleBackupReservations.remove(new PendingReservationKey(emergencyId, category)); // recupera la lista dei veicoli di backup di una categoria
+        if (backup == null) { // nessun veicolo di backup esistente di quella categoria
+            return;
+        }
+        Emergency emergency = getEmergency(emergencyId);
+        int remainingNeed = backup.size() - remoteConfirmedCount; // quanti piano B servono ancora dopo il contributo remoto
+        for (int i = 0; i < backup.size(); i++) {
+            Vehicle vehicle = getVehicle(backup.get(i));
+            if (i < remainingNeed) { // nessuna offerta remota lo ha sostituito: attivato
+                vehicle.setStatus(VehicleStatus.EN_ROUTE);
+                vehicle.setDestination(emergency.getPosition());
+                emergency.addAssignedVehicle(vehicle.getId());
+            } else { // sostituito da un'offerta remota migliore: rilasciato
+                vehicle.setStatus(VehicleStatus.AVAILABLE);
+            }
+        }
     }
 
     // prenotazioni cross-zona
@@ -322,6 +374,52 @@ public class ZoneState {
         List<VehicleId> vehicleIds = pendingReservations.remove(new PendingReservationKey(emergencyId, category));
         return Optional.ofNullable(vehicleIds);
     }
+
+    // salva la posizione dell'emergenza ricevuta dalla CallForProposal, in modo che il contractor possa assegnarla al momento della ricezione di un messaggio ContractResolution
+    public void storeEmergencyPosition(EmergencyId emergencyId, VehicleCategory category, Position position) {
+        pendingEmergencyPositions.put(new PendingReservationKey(emergencyId, category), position);
+    }
+
+    // rimuove l'informazione della posizione una volta che ContractResolution è stata conclusa, così da non lasciare dati inutili in memoria
+    public Optional<Position> removeEmergencyPosition(EmergencyId emergencyId, VehicleCategory category) {
+        return Optional.ofNullable(pendingEmergencyPositions.remove(new PendingReservationKey(emergencyId, category)));
+    }
+
+    // prestiti attivi (handoff)
+
+    // salva un prestito quando il veicolo parte verso l'emergenza, così da escludere il veicolo del prestito dalla fase 2
+    public void addActiveLoan(VehicleId vehicleId, EmergencyId emergencyId, ZoneId requesterZoneId, VehicleCategory category) {
+        activeLoans.put(vehicleId, new ActiveLoan(emergencyId, requesterZoneId, category));
+    }
+
+    // rimuove il prestito
+    public void removeActiveLoan(VehicleId vehicleId) {
+        activeLoans.remove(vehicleId);
+        loanRepository.delete(vehicleId); // rimuove il prestito dal db
+    }
+
+    // salva nel db un prestito quando il veicolo ritorna dall'emergenza, così da poter notificare l'initiator che l'emergenza è stata completata
+    public void savePendingLoan(VehicleId vehicleId) {
+        ActiveLoan loan = activeLoans.get(vehicleId);
+        if (loan == null) {
+            throw new IllegalStateException("No active loan found to persist for vehicle: " + vehicleId.value());
+        }
+        loanRepository.save(vehicleId, loan.emergencyId(), loan.requesterZoneId(), loan.category()); // salva nel db (non può essere fatto insieme ad addActiveLoan perchè
+    }
+
+    // recupera i prestiti ancora in sospeso (interventi già conclusi prima del crash, ack non ancora ricevuto)
+    public List<PendingLoan> loadPendingLoans() {
+        return loanRepository.loadAll();
+    }
+
+    public Optional<ActiveLoan> getActiveLoan(VehicleId vehicleId) {
+        return Optional.ofNullable(activeLoans.get(vehicleId));
+    }
+
+    public boolean hasActiveLoan(VehicleId vehicleId) {
+        return activeLoans.containsKey(vehicleId);
+    }
+
 
     // vector clock
 
