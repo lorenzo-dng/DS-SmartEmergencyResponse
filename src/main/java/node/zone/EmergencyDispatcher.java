@@ -58,7 +58,7 @@ public class EmergencyDispatcher {
             );
             List<FlatOffer> selected = flatOffers.stream().limit(stillMissing).collect(Collectors.toList()); // prende solo i primi veicoli nel numero mancante
             for (FlatOffer offer : selected) { // per ogni offerta di veicolo
-                zoneState.addBorrowedVehicle(offer.vehicleId(), category);
+                zoneState.addBorrowedVehicle(offer.vehicleId(), emergency.getId(), category, offer.contractorZoneId());
                 emergency.addAssignedVehicle(offer.vehicleId()); // aggiunge il veicolo tra quelli assegnati all'emergenza
                 selectedIds.add(offer.vehicleId()); // aggiunge l'id del veicolo nella lista dedicata
             }

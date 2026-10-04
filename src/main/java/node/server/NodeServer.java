@@ -15,6 +15,9 @@ import io.vertx.core.VerticleBase;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
+import node.vehicle.VehicleLifecycleManager;
+import node.zone.ActiveLoan;
+import node.zone.CheckpointRepository;
 import node.zone.ZoneState;
 
 import java.util.ArrayList;
@@ -28,11 +31,15 @@ public class NodeServer extends VerticleBase {
     private final int port;
     private final ZoneState zoneState;
     private final int reservationTimeoutMs;
+    private final CheckpointRepository checkpointRepository;
+    private final VehicleLifecycleManager lifecycleManager;
 
-    public NodeServer(int port, ZoneState zoneState, int reservationTimeoutMs) {
+    public NodeServer(int port, ZoneState zoneState, int reservationTimeoutMs, CheckpointRepository checkpointRepository, VehicleLifecycleManager lifecycleManager) {
         this.port = port;
         this.zoneState = zoneState;
         this.reservationTimeoutMs = reservationTimeoutMs;
+        this.checkpointRepository = checkpointRepository;
+        this.lifecycleManager = lifecycleManager;
     }
 
     // avvia il server http del nodo
@@ -46,6 +53,8 @@ public class NodeServer extends VerticleBase {
         router.post("/contract-net/call-for-proposal").handler(this::handleCallForProposal);
         router.post("/contract-net/resolution").handler(this::handleContractResolution);
         router.post("/contract-net/intervention-completed").handler(this::handleInterventionCompleted);
+        router.post("/contract-net/arrived-on-scene").handler(this::handleArrivedOnScene);
+        router.post("/contract-net/scene-deadline").handler(this::handleSceneDeadline);
 
         // crea e avvia il server http vertx in ascolto sulla porta indicata
         return vertx.createHttpServer().requestHandler(router).listen(port)
@@ -109,6 +118,9 @@ public class NodeServer extends VerticleBase {
                     for (VehicleId vehicleId : reservedIds) { // per ogni veicolo
                         Vehicle vehicle = zoneState.getVehicle(vehicleId);
                         if (resolution.confirmedVehicleIds().contains(vehicleId)) { // se il veicolo è stato confermato
+                            Position destination = emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value()));
+                            ActiveLoan loan = new ActiveLoan(resolution.emergencyId(), resolution.requesterZoneId(), resolution.category());
+                            checkpointRepository.save(vehicleId, VehicleStatus.EN_ROUTE, vehicle.getPosition(), destination, vehicle.getBatteryLevel(), loan, null, null); // salva il checkpoint del veicolo con l'informazione del prestito nel db, così da ripristinarlo in caso di crash
                             vehicle.setStatus(VehicleStatus.EN_ROUTE);
                             vehicle.setDestination(emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value())));
                             zoneState.addActiveLoan(vehicleId, resolution.emergencyId(), resolution.requesterZoneId(), resolution.category()); // salva l'attivazione del prestito
@@ -122,14 +134,29 @@ public class NodeServer extends VerticleBase {
         ctx.response().setStatusCode(204).end(); //indica "la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta" (il contractor non risponde)
     }
 
-    // gestisce la ricezione della notifica di completamento del veicolo prestato da parte del contractor
+    // gestisce la ricezione della notifica di completamento teorico dell'intervento per il veicolo prestato
     private void handleInterventionCompleted(RoutingContext ctx) {
         InterventionCompleted notification = InterventionCompleted.fromJson(ctx.body().asJsonObject());
         Emergency emergency = zoneState.getEmergency(notification.emergencyId()); // recupera l'id dell'emergenza
         if (emergency.getStatus() != EmergencyStatus.CLOSED) { // se l'emergenza è ancora aperta
             emergency.markVehicleCompleted(notification.vehicleId()); // segna che il veicolo ha completato l'intervento sull'emergenza
         }
-        zoneState.removeBorrowedVehicle(notification.vehicleId());
+        zoneState.removeBorrowedVehicle(notification.vehicleId(), notification.emergencyId());
+        ctx.response().setStatusCode(200).end();
+    }
+
+    // gestisce la ricezione della notifica di arrivo di un veicolo sull'emergenza
+    private void handleArrivedOnScene(RoutingContext ctx) {
+        ArrivedOnScene notification = ArrivedOnScene.fromJson(ctx.body().asJsonObject());
+        Emergency emergency = zoneState.getEmergency(notification.emergencyId());
+        lifecycleManager.handleSceneArrival(emergency, notification.category(), notification.vehicleId(), System.currentTimeMillis());
+        ctx.response().setStatusCode(200).end();
+    }
+
+    // gestisce la ricezione della notifica di completamento effettivo dell'intervento per il veicolo prestato
+    private void handleSceneDeadline(RoutingContext ctx) {
+        SceneDeadline notification = SceneDeadline.fromJson(ctx.body().asJsonObject());
+        lifecycleManager.scheduleBorrowedCompletion(notification.vehicleId(), notification.deadlineMillis());
         ctx.response().setStatusCode(200).end();
     }
 }

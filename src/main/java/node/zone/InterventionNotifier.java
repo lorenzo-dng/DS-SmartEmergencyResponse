@@ -36,7 +36,7 @@ public class InterventionNotifier {
         InterventionCompleted message = new InterventionCompleted(emergencyId, vehicleId, category);
         String address = addressResolver.apply(requesterZoneId);
         webClient.postAbs("http://" + address + "/contract-net/intervention-completed").sendJsonObject(message.toJson())
-                .onSuccess(response -> zoneState.removeActiveLoan(vehicleId)) // ack ricevuto: prestito concluso
-                .onFailure(err -> vertx.setTimer(retryIntervalMs, id -> attemptSend(emergencyId, requesterZoneId, vehicleId, category))); // riprova dopo trascorso il timer
+                .onSuccess(response -> zoneState.deletePendingLoan(vehicleId, emergencyId)) // ack ricevuto: prestito concluso
+                .onFailure(err -> vertx.setTimer(retryIntervalMs, id -> attemptSend(emergencyId, requesterZoneId, vehicleId, category))); // riprova dopo il timer
     }
 }

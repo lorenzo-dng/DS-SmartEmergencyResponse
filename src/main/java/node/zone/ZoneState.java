@@ -26,24 +26,28 @@ public class ZoneState {
     private final Map<EmergencyId, Emergency> emergencies;
     private final Map<PendingReservationKey, List<VehicleId>> pendingReservations;
     private final Map<PendingReservationKey, List<VehicleId>> vehicleBackupReservations;
-    private final Map<VehicleId, VehicleCategory> borrowedVehicleCategories;
+    private final Map<BorrowedVehicleKey, BorrowedVehicleInfo> borrowedVehicleCategories; // veicoli ricevuti in prestito, con la zona a cui rispondere
     private final Map<PendingReservationKey, Position> pendingEmergencyPositions;
     private final Map<VehicleId, ActiveLoan> activeLoans;
-    private final LoanRepository loanRepository;
-    private final Zone zone;
+    private final Map<PendingReservationKey, List<VehicleId>> vehiclesOnScene; // barriera: veicoli della categoria già arrivati sulla scena per un'emergenza
     private VectorClock localClock;
+    private final Zone zone;
+    private final LoanRepository loanRepository;
+    private final CheckpointRepository checkpointRepository;
 
-    public ZoneState(Zone zone, LoanRepository loanRepository) {
-        this.zone = zone;
+    public ZoneState(Zone zone, LoanRepository loanRepository, CheckpointRepository checkpointRepository) {
         this.vehicles = new HashMap<>();
         this.emergencies = new HashMap<>();
         this.pendingReservations = new HashMap<>();
-        this.pendingEmergencyPositions = new HashMap<>();
-        this.borrowedVehicleCategories = new HashMap<>();
-        this.activeLoans = new HashMap<>();
-        this.localClock = new VectorClock();
         this.vehicleBackupReservations = new HashMap<>();
+        this.borrowedVehicleCategories = new HashMap<>();
+        this.pendingEmergencyPositions = new HashMap<>();
+        this.activeLoans = new HashMap<>();
+        this.vehiclesOnScene = new HashMap<>();
+        this.localClock = new VectorClock();
+        this.zone = zone;
         this.loanRepository = loanRepository;
+        this.checkpointRepository = checkpointRepository;
     }
 
     public ZoneId getZoneId() {
@@ -73,6 +77,11 @@ public class ZoneState {
         return Collections.unmodifiableCollection(vehicles.values());
     }
 
+    // vero se il veicolo è fisicamente posseduto da questa zona (locale, anche se magari prestato ad altri)
+    public boolean hasVehicle(VehicleId id) {
+        return vehicles.containsKey(id);
+    }
+
     // recupera i veicoli liberi di una specifica categoria
     public List<Vehicle> getAvailableVehicles(VehicleCategory category) {
         List<Vehicle> available = new ArrayList<>();
@@ -85,13 +94,19 @@ public class ZoneState {
     }
 
     // registra un veicolo preso in prestito da un'altra zona
-    public void addBorrowedVehicle(VehicleId vehicleId, VehicleCategory category) {
-        borrowedVehicleCategories.put(vehicleId, category);
+    public void addBorrowedVehicle(VehicleId vehicleId, EmergencyId emergencyId, VehicleCategory category, ZoneId contractorZoneId) {
+        borrowedVehicleCategories.put(new BorrowedVehicleKey(vehicleId, emergencyId), new BorrowedVehicleInfo(category, contractorZoneId));
     }
 
     // rimuove un veicolo preso in prestito da un'altra zona
-    public void removeBorrowedVehicle(VehicleId vehicleId) {
-        borrowedVehicleCategories.remove(vehicleId);
+    public void removeBorrowedVehicle(VehicleId vehicleId, EmergencyId emergencyId) {
+        borrowedVehicleCategories.remove(new BorrowedVehicleKey(vehicleId, emergencyId));
+    }
+
+    // restituisce la zona del contractor che ha prestato il veicolo
+    public Optional<ZoneId> getBorrowedVehicleContractorZone(VehicleId vehicleId, EmergencyId emergencyId) {
+        BorrowedVehicleInfo info = borrowedVehicleCategories.get(new BorrowedVehicleKey(vehicleId, emergencyId));
+        return Optional.ofNullable(info).map(BorrowedVehicleInfo::contractorZoneId);
     }
 
     // emergenze
@@ -167,6 +182,7 @@ public class ZoneState {
                     // ricordando che a una stessa emergenza possono essere associati piu veicoli di una stessa categoria: crea la coppia (chiave - lista) se non esiste gia, altrimenti se la chiave esiste gia, restituisce la lista. Successivamente aggiunge il veicolo
                     vehicleBackupReservations.computeIfAbsent(new PendingReservationKey(emergency.getId(), category), k -> new ArrayList<>()).add(vehicle.getId());
                 } else {
+                    checkpointRepository.save(vehicle.getId(), VehicleStatus.EN_ROUTE, vehicle.getPosition(), emergency.getPosition(), vehicle.getBatteryLevel(), null, null, null); // salva il checkpoint del veicolo nel db, così da ripristinarlo in caso di crash
                     vehicle.setStatus(VehicleStatus.EN_ROUTE);
                     vehicle.setDestination(emergency.getPosition());
                     emergency.addAssignedVehicle(vehicle.getId());
@@ -180,7 +196,7 @@ public class ZoneState {
         return requiredQuantityFor(emergency, category) - countAssignedVehiclesOfCategory(emergency, category);
     }
 
-    // calcola quanti veicoli della categoria sono ancora necessari per la nuova emergenza
+    // calcola quanti veicoli della categoria sono ancora necessari per l'emergenza
     private int requiredQuantityFor(Emergency emergency, VehicleCategory category) {
         for (VehicleRequirement requirement : emergency.getRequiredVehicles()) { // scorre i veicoli richiesti
             if (requirement.category() == category) { // se la categoria coincide con quella richiesta
@@ -194,7 +210,7 @@ public class ZoneState {
     private int countAssignedVehiclesOfCategory(Emergency emergency, VehicleCategory category) {
         int count = 0;
         for (VehicleId id : emergency.getAssignedVehicles()) {
-            VehicleCategory vehicleCategory = vehicles.containsKey(id) ? getVehicle(id).getCategory() : borrowedVehicleCategories.get(id);
+            VehicleCategory vehicleCategory = vehicles.containsKey(id) ? getVehicle(id).getCategory() : Optional.ofNullable(borrowedVehicleCategories.get(new BorrowedVehicleKey(id, emergency.getId()))).map(BorrowedVehicleInfo::category).orElse(null);
             if (vehicleCategory == category) {
                 count++;
             }
@@ -279,6 +295,7 @@ public class ZoneState {
                 Emergency previousEmergency = origins.get(i); // trova l'emergenza a cui il veicolo era precedentemente assegnato
                 Emergency newEmergency = slots.get(assignment[i]); // recupera l'emergenza da coprire
                 previousEmergency.removeAssignedVehicle(vehicle.getId()); // rimuove il veicolo dalla precedente emergenza (che torna nel pool)
+                checkpointRepository.save(vehicle.getId(), VehicleStatus.EN_ROUTE, vehicle.getPosition(), newEmergency.getPosition(), vehicle.getBatteryLevel(), null, null, null); // salva il checkpoint del veicolo nel db, così da ripristinarlo in caso di crash
                 vehicle.setDestination(newEmergency.getPosition()); // imposta la posizione della nuova emergenza come nuova destinazione
                 newEmergency.addAssignedVehicle(vehicle.getId()); // assegna il veicolo alla nuova emergenza
             }
@@ -342,7 +359,7 @@ public class ZoneState {
         }
     }
 
-    // risolve l'eventuale backup locale dopo l'esito della fase 3: attiva i veicoli di riserva ancora necessari, rilascia gli altri
+    // considera l'eventuale backup locale dopo l'esito della fase 3: attiva i veicoli di riserva ancora necessari, rilascia gli altri
     public void resolveVehicleBackup(EmergencyId emergencyId, VehicleCategory category, int remoteConfirmedCount) {
         List<VehicleId> backup = vehicleBackupReservations.remove(new PendingReservationKey(emergencyId, category)); // recupera la lista dei veicoli di backup di una categoria
         if (backup == null) { // nessun veicolo di backup esistente di quella categoria
@@ -353,6 +370,7 @@ public class ZoneState {
         for (int i = 0; i < backup.size(); i++) {
             Vehicle vehicle = getVehicle(backup.get(i));
             if (i < remainingNeed) { // nessuna offerta remota lo ha sostituito: attivato
+                checkpointRepository.save(vehicle.getId(), VehicleStatus.EN_ROUTE, vehicle.getPosition(), emergency.getPosition(), vehicle.getBatteryLevel(), null, null, null); // salva il checkpoint del veicolo nel db, così da ripristinarlo in caso di crash
                 vehicle.setStatus(VehicleStatus.EN_ROUTE);
                 vehicle.setDestination(emergency.getPosition());
                 emergency.addAssignedVehicle(vehicle.getId());
@@ -392,10 +410,9 @@ public class ZoneState {
         activeLoans.put(vehicleId, new ActiveLoan(emergencyId, requesterZoneId, category));
     }
 
-    // rimuove il prestito
-    public void removeActiveLoan(VehicleId vehicleId) {
+    // chiude in memoria la fase "prestito in corso": a intervento concluso il veicolo può essere riassegnato dalla propria zona.
+    public void closeActiveLoan(VehicleId vehicleId) {
         activeLoans.remove(vehicleId);
-        loanRepository.delete(vehicleId); // rimuove il prestito dal db
     }
 
     // salva nel db un prestito quando il veicolo ritorna dall'emergenza, così da poter notificare l'initiator che l'emergenza è stata completata
@@ -404,10 +421,15 @@ public class ZoneState {
         if (loan == null) {
             throw new IllegalStateException("No active loan found to persist for vehicle: " + vehicleId.value());
         }
-        loanRepository.save(vehicleId, loan.emergencyId(), loan.requesterZoneId(), loan.category()); // salva nel db (non può essere fatto insieme ad addActiveLoan perchè
+        loanRepository.save(vehicleId, loan.emergencyId(), loan.requesterZoneId(), loan.category()); // salva nel db (non può essere fatto insieme ad addActiveLoan perchè viene utilizzato per inviare le notifiche di completamento all'initiator. Se venisse fatto in addActiveLoan, allora le notifiche arriverebbero anche quando il veicolo è ancora ON_ROUTE)
     }
 
-    // recupera i prestiti ancora in sospeso (interventi già conclusi prima del crash, ack non ancora ricevuto)
+    // rimuove dal db un prestito lasciato in sospeso dopo l'intervento del veicolo sull'emergenza, una volta ricevuto l'ack dell'initiator
+    public void deletePendingLoan(VehicleId vehicleId, EmergencyId emergencyId) {
+        loanRepository.delete(vehicleId, emergencyId);
+    }
+
+    // recupera i prestiti ancora in sospeso
     public List<PendingLoan> loadPendingLoans() {
         return loanRepository.loadAll();
     }
@@ -420,6 +442,25 @@ public class ZoneState {
         return activeLoans.containsKey(vehicleId);
     }
 
+    // barriera per l'intervento dei veicoli sull'emergenza
+
+    // registra l'arrivo di un veicolo su un'emergenza
+    public List<VehicleId> registerArrivalOnScene(EmergencyId emergencyId, VehicleCategory category, VehicleId vehicleId) {
+        List<VehicleId> arrived = vehiclesOnScene.computeIfAbsent(new PendingReservationKey(emergencyId, category), k -> new ArrayList<>());
+        if (!arrived.contains(vehicleId)) { // evita di contare due volte un arrivo duplicato, rimandato dopo un crash del contractor
+            arrived.add(vehicleId);
+        }
+        return arrived;
+    }
+
+    // verifica se tutti i veicoli richiesti di una categoria sono arrivati sull'emergenza
+    public boolean isSceneGroupComplete(Emergency emergency, VehicleCategory category, List<VehicleId> arrived) {
+        return arrived.size() >= requiredQuantityFor(emergency, category);
+    }
+
+    public void clearSceneGroup(EmergencyId emergencyId, VehicleCategory category) {
+        vehiclesOnScene.remove(new PendingReservationKey(emergencyId, category));
+    }
 
     // vector clock
 
