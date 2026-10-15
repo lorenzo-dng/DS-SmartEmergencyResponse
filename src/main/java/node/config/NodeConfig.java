@@ -5,7 +5,7 @@ import domain.zone.ZoneId;
 // record che preleva dal docker-compose le informazioni riguardanti la posizione della griglia sulla mappa e la posizione in griglia della zona
 public record NodeConfig(int zoneRow, int zoneCol, int gridRows, int gridCols, double mapLatMin, double mapLatMax,
                          double mapLonMin, double mapLonMax, int httpPort, String vehiclesConfigPath,
-                         String pendingLoansDbPath, int neighborTimeoutMs, int reservationTimeoutMs,
+                         String dbPath, int neighborTimeoutMs, int reservationTimeoutMs,
                          int handoffRetryIntervalMs) {
 
     private static final int DEFAULT_NEIGHBOR_TIMEOUT_MS = 2000;
@@ -24,7 +24,7 @@ public record NodeConfig(int zoneRow, int zoneCol, int gridRows, int gridCols, d
                 parseDoubleEnv("MAP_LON_MAX"), // longitudine massima dell'intera mappa (bordo est)
                 parseIntEnv("HTTP_PORT"), // porta su cui il nodo è in ascolto
                 parseStringEnv("VEHICLES_CONFIG_PATH"), // percorso di configurazione dei veicoli
-                parseStringEnv("PENDING_LOANS_DB_PATH"), // percorso del db dei prestiti
+                parseStringEnv("DB_PATH"), // percorso del db del nodo (prestiti, veicoli, emergenze)
                 parseIntEnvOrDefault("NEIGHBOR_TIMEOUT_MS", DEFAULT_NEIGHBOR_TIMEOUT_MS), // timeout (ms) per le richieste HTTP verso i nodi vicini
                 parseIntEnvOrDefault("RESERVATION_TIMEOUT_MS", DEFAULT_RESERVATION_TIMEOUT_MS), // timeout (ms) per l'attesa della prenotazione del veicolo, dopo il quale il veicolo torna libero
                 parseIntEnvOrDefault("HANDOFF_RETRY_INTERVAL_MS", DEFAULT_HANDOFF_RETRY_INTERVAL_MS) // timeout (ms) per la comunicazione del completamento dell'intervento del veicolo sull'emergenza

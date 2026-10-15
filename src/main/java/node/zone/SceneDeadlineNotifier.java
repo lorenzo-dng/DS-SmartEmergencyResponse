@@ -10,7 +10,7 @@ import io.vertx.ext.web.client.WebClientOptions;
 
 import java.util.function.Function;
 
-// comunica al contractor il completamento dell'intervento per un veicolo prestato (quindi tutti i veicoli della categoria hanno completato l'intervento), ritentando finché non arriva ack
+// initiator -> contractor: comunica al contractor il completamento dell'intervento per un veicolo prestato (quindi tutti i veicoli della categoria hanno completato l'intervento), ritentando finché non arriva ack
 public class SceneDeadlineNotifier {
 
     private final Vertx vertx;

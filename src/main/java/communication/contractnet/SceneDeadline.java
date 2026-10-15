@@ -4,7 +4,6 @@ import domain.emergency.EmergencyId;
 import domain.vehicle.VehicleId;
 import io.vertx.core.json.JsonObject;
 
-// initiator -> contractor: notifica che il gruppo della categoria del veicolo e il veicolo prestato ha completato l'intervento
 public record SceneDeadline(EmergencyId emergencyId, VehicleId vehicleId, long deadlineMillis) {
 
     public JsonObject toJson() {

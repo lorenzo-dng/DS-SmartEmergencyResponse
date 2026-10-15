@@ -10,17 +10,17 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 
-// salva l'ultimo stato noto di ogni veicolo
-public class CheckpointRepository {
+// salva lo stato di un veicolo
+public class VehicleRepository {
 
-    private final String jdbcUrl;
+    private final SqliteDatabase database;
 
-    public CheckpointRepository(String dbPath) {
-        this.jdbcUrl = "jdbc:sqlite:" + dbPath;
+    public VehicleRepository(SqliteDatabase database) {
+        this.database = database;
         createTableIfNotExists();
     }
 
-    // crea la tabella nel database SQLite, se non esiste
+    // crea la tabella
     private void createTableIfNotExists() {
         // query sql
         String sql = "CREATE TABLE IF NOT EXISTS vehicle_checkpoints" +
@@ -36,7 +36,7 @@ public class CheckpointRepository {
                 "requester_zone_id TEXT," +
                 "scene_started_at INTEGER," +
                 "scene_deadline INTEGER)";
-        try (Connection conn = DriverManager.getConnection(jdbcUrl); // apre la connessione al database
+        try (Connection conn = database.open(); // apre la connessione al database
              Statement stmt = conn.createStatement()) {
             stmt.execute(sql); // crea la tabella
         } catch (SQLException e) {
@@ -44,14 +44,21 @@ public class CheckpointRepository {
         }
     }
 
-    // inserisce o aggiorna le informazioni di un veicolo non AVAILABLE
+    // inserisce o aggiorna lo stato di un veicolo non AVAILABLE
     public void save(VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long sceneStartedAtMillis, Long sceneDeadlineMillis) {
+        try (Connection conn = database.open()) {
+            save(conn, vehicleId, status, position, destination, batteryLevel, loan, sceneStartedAtMillis, sceneDeadlineMillis);
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to persist vehicle checkpoint: " + e.getMessage(), e);
+        }
+    }
+
+    public void save(Connection conn, VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long sceneStartedAtMillis, Long sceneDeadlineMillis) throws SQLException {
         // query sql
         String sql = "INSERT OR REPLACE INTO vehicle_checkpoints" +
                 "(vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, scene_started_at, scene_deadline)" + // colonne
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; // valori ancora da specificare (segnaposti)
-        try (Connection conn = DriverManager.getConnection(jdbcUrl); // apre la connessione al database
-             PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, vehicleId.value()); // riempie il primo segnaposto
             ps.setString(2, status.name());
             ps.setDouble(3, position.latitude());
@@ -83,20 +90,23 @@ public class CheckpointRepository {
                 ps.setNull(12, Types.BIGINT);
             }
             ps.executeUpdate();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to persist vehicle checkpoint: " + e.getMessage(), e);
         }
     }
 
     // rimuove il checkpoint quando il veicolo torna AVAILABLE
     public void delete(VehicleId vehicleId) {
-        String sql = "DELETE FROM vehicle_checkpoints WHERE vehicle_id = ?"; // query sql
-        try (Connection conn = DriverManager.getConnection(jdbcUrl);
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, vehicleId.value());  // riempie il primo segnaposto
-            ps.executeUpdate(); // rimuove il veicolo prestato
+        try (Connection conn = database.open()) {
+            delete(conn, vehicleId);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to delete vehicle checkpoint: " + e.getMessage(), e);
+        }
+    }
+
+    public void delete(Connection conn, VehicleId vehicleId) throws SQLException {
+        String sql = "DELETE FROM vehicle_checkpoints WHERE vehicle_id = ?"; // query sql
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, vehicleId.value());  // riempie il primo segnaposto
+            ps.executeUpdate(); // rimuove il checkpoint del veicolo
         }
     }
 
@@ -104,7 +114,7 @@ public class CheckpointRepository {
     public List<VehicleCheckpoint> loadAll() {
         List<VehicleCheckpoint> checkpoints = new ArrayList<>();
         String sql = "SELECT vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, scene_started_at, scene_deadline FROM vehicle_checkpoints"; // query sql
-        try (Connection conn = DriverManager.getConnection(jdbcUrl);
+        try (Connection conn = database.open();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) { // esegue la query e restituisce i risultati delle colonne (righe)
             while (rs.next()) { // per ogni riga (risultato) restituita

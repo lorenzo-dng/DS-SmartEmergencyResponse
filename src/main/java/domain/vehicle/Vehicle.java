@@ -4,6 +4,8 @@ import domain.common.Position;
 import domain.zone.ZoneId;
 
 public class Vehicle {
+    public static final double MIN_BATTERY_LEVEL = 0.0;
+    public static final double MAX_BATTERY_LEVEL = 100.0;
     private final VehicleId id;
     private final VehicleCategory category;
     private final ZoneId homeZone;
@@ -80,7 +82,7 @@ public class Vehicle {
     }
 
     public void setBatteryLevel(double batteryLevel) {
-        if (batteryLevel < 0.0 || batteryLevel > 100.0) {
+        if (batteryLevel < MIN_BATTERY_LEVEL || batteryLevel > MAX_BATTERY_LEVEL) {
             throw new IllegalArgumentException("Battery level must be in [0, 100]: " + batteryLevel);
         }
         this.batteryLevel = batteryLevel;

@@ -40,7 +40,7 @@ public class EmergencyDispatcher {
             return Future.succeededFuture();
         }
         // altrimenti, esegue una richiesta cross-zona ai vicini
-        boolean isHigh = emergency.getSeverity().effectiveSeverity(emergency.getAgingTimeMillis()) == Severity.HIGH;
+        boolean isHigh = emergency.getEffectiveSeverity() == Severity.HIGH;
         CallForProposal cfp = new CallForProposal(emergency.getId(), zoneState.getZoneId(), emergency.getPosition(), category, missing, isHigh);
         return contractNetClient.callForProposals(cfp, neighbors).compose(submissions -> resolveAndConfirm(emergency, category, submissions)); // recupera tutte le risposte e le risolve
     }
@@ -62,6 +62,7 @@ public class EmergencyDispatcher {
                 emergency.addAssignedVehicle(offer.vehicleId()); // aggiunge il veicolo tra quelli assegnati all'emergenza
                 selectedIds.add(offer.vehicleId()); // aggiunge l'id del veicolo nella lista dedicata
             }
+            zoneState.saveEmergency(emergency); // salva i veicoli richiesti nel db prima di inviare la conferma ai contractor, così non vanno persi in caso di crash
         }
         zoneState.resolveVehicleBackup(emergency.getId(), category, selectedIds.size()); // attiva o rilascia l'eventuale veicolo di backup
         return sendResolutionsToAll(emergency, category, submissions, selectedIds);
@@ -86,7 +87,6 @@ public class EmergencyDispatcher {
                     .map(VehicleOffer::vehicleId) // estrae solo l'id del veicolo
                     .filter(selectedIds::contains) // filtra la lista di id mantenendo solo quelli presenti nella lista
                     .collect(Collectors.toList()); // mette tutto in una nuova lista
-
             // invia l'esito conclusivo ai contractor
             ContractResolution resolution = new ContractResolution(emergency.getId(), category, zoneState.getZoneId(), confirmed);
             sendFutures.add(contractNetClient.sendResolution(resolution, submission.contractorZoneId()));

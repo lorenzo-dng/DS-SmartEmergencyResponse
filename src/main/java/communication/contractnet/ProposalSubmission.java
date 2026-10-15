@@ -23,7 +23,6 @@ public record ProposalSubmission(EmergencyId emergencyId, VehicleCategory catego
                 .put("contractorZoneId", contractorZoneId.value())
                 .put("vehicleOffers", offersJson)
                 .put("availableFleetCount", availableFleetCount);
-
     }
 
     // serve all' initiator per ricevere il messaggio json

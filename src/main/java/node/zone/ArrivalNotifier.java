@@ -11,7 +11,7 @@ import io.vertx.ext.web.client.WebClientOptions;
 
 import java.util.function.Function;
 
-// notifica all'initiator l'arrivo di un veicolo prestato sull'emergenza, ritentando finché non arriva ack
+// contractor -> initiator: notifica all'initiator l'arrivo di un veicolo prestato sull'emergenza, ritentando finché non arriva ack
 public class ArrivalNotifier {
 
     private final Vertx vertx;

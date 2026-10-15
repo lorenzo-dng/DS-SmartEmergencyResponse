@@ -10,7 +10,7 @@ import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
 import java.util.function.Function;
 
-// notifica all'initiator il completamento dell'intervento di un veicolo prestato, ritentando finché non arriva ack
+// contractor -> initiator: notifica all'initiator il completamento dell'intervento di un veicolo prestato, ritentando finché non arriva ack
 public class InterventionNotifier {
 
     private final Vertx vertx;

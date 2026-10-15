@@ -11,10 +11,10 @@ import java.util.List;
 // usa SQLite per salvare i prestiti lasciati in sospeso dopo l'intervento del veicolo sull'emergenza, necessario a sopravvivere a un crash del contractor a metà prestito
 public class LoanRepository {
 
-    private final String jdbcUrl;
+    private final SqliteDatabase database;
 
-    public LoanRepository(String dbPath) {
-        this.jdbcUrl = "jdbc:sqlite:" + dbPath;
+    public LoanRepository(SqliteDatabase database) {
+        this.database = database;
         createTableIfNotExists();
     }
 
@@ -27,7 +27,7 @@ public class LoanRepository {
                 "requester_zone_id TEXT NOT NULL," +
                 "category TEXT NOT NULL," +
                 "PRIMARY KEY (vehicle_id, emergency_id))";
-        try (Connection conn = DriverManager.getConnection(jdbcUrl); // apre la connessione al database
+        try (Connection conn = database.open(); // apre la connessione al database
              Statement stmt = conn.createStatement()) {
             stmt.execute(sql); // crea la tabella
         } catch (SQLException e) {
@@ -41,7 +41,7 @@ public class LoanRepository {
         String sql = "INSERT OR REPLACE INTO pending_loans" +
                 "(vehicle_id, emergency_id, requester_zone_id, category)" + // colonne
                 "VALUES (?, ?, ?, ?)"; // valori ancora da specificare (segnaposti)
-        try (Connection conn = DriverManager.getConnection(jdbcUrl); // apre la connessione al database
+        try (Connection conn = database.open(); // apre la connessione al database
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, vehicleId.value()); // riempie il primo segnaposto
             ps.setString(2, emergencyId.value());
@@ -56,7 +56,7 @@ public class LoanRepository {
     // rimuove un prestito concluso (chiamato quando arriva l'ack di InterventionCompleted)
     public void delete(VehicleId vehicleId, EmergencyId emergencyId) {
         String sql = "DELETE FROM pending_loans WHERE vehicle_id = ? AND emergency_id = ?"; // query sql
-        try (Connection conn = DriverManager.getConnection(jdbcUrl);
+        try (Connection conn = database.open();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, vehicleId.value()); // riempie il primo segnaposto
             ps.setString(2, emergencyId.value());
@@ -70,7 +70,7 @@ public class LoanRepository {
     public List<PendingLoan> loadAll() {
         List<PendingLoan> loans = new ArrayList<>();
         String sql = "SELECT vehicle_id, emergency_id, requester_zone_id, category FROM pending_loans"; // query sql
-        try (Connection conn = DriverManager.getConnection(jdbcUrl);
+        try (Connection conn = database.open();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) { // esegue la query e restituisce i risultati delle colonne (righe)
             while (rs.next()) { // per ogni riga (risultato) restituita, aggiunge un record

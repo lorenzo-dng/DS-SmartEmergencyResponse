@@ -3,6 +3,7 @@ package domain.emergency;
 import domain.common.Position;
 import domain.zone.ZoneId;
 import domain.vehicle.VehicleId;
+
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,7 +18,8 @@ public class Emergency {
     private Severity severity;
     private List<VehicleRequirement> requiredVehicles;
     private final List<VehicleId> assignedVehicles;
-    private long agingTimeMillis;
+    private long agingTime; // aging accumulato fino all'ultimo cambio di stato
+    private Long agingSince; // istante (in ms) in cui è iniziato l'accumulo dell'aging (può essere null)
     private EmergencyStatus status;
     private int completedVehicleCount; // veicoli che hanno completato l'intervento sull'emergenza
 
@@ -29,7 +31,8 @@ public class Emergency {
         this.localTimestamp = localTimestamp;
         this.requiredVehicles = new ArrayList<>();
         this.assignedVehicles = new ArrayList<>();
-        this.agingTimeMillis = 0;
+        this.agingTime = 0;
+        this.agingSince = System.currentTimeMillis(); // appena creata l'emergenza è in attesa di veicoli, quindi l'aging parte subito
         this.status = EmergencyStatus.QUEUED;
         this.completedVehicleCount = 0;
     }
@@ -58,6 +61,11 @@ public class Emergency {
         return severity;
     }
 
+    // gravità effettiva dell'emergenza: quella dichiarata dal triage, aumentata in base all'aging accumulato
+    public Severity getEffectiveSeverity() {
+        return severity.effectiveSeverity(getAgingTime());
+    }
+
     public void setSeverity(Severity severity) {
         if (this.status == EmergencyStatus.CLOSED) {
             throw new IllegalStateException("Cannot modify a closed emergency: " + id);
@@ -81,6 +89,22 @@ public class Emergency {
     // questo perche ogni modifica richiede "updateStatus", e potrebbe essere dimenticato se la lista verrebbe direttamente utilizzata per scrittura
     public List<VehicleId> getAssignedVehicles() {
         return Collections.unmodifiableList(assignedVehicles);
+    }
+
+    // restituisce il tempo totale di aging accumulato (calcolato sulle fasi in cui non era coperta dai veicoli)
+    public long getAgingTime() {
+        if (agingSince == null) {
+            return agingTime;
+        }
+        return agingTime + Math.max(0L, System.currentTimeMillis() - agingSince);
+    }
+
+    public EmergencyStatus getStatus() {
+        return status;
+    }
+
+    public int getCompletedVehicleCount() {
+        return completedVehicleCount;
     }
 
     public void addAssignedVehicle(VehicleId vehicleId) {
@@ -107,45 +131,67 @@ public class Emergency {
         if (assignedVehicles.remove(vehicleId)) {
             completedVehicleCount++;
         }
-        if (isFullyServed()) {
-            this.status = EmergencyStatus.CLOSED;
-        } else {
-            updateStatus();
-        }
-    }
-
-    public long getAgingTimeMillis() {
-        return agingTimeMillis;
-    }
-
-    public void incrementAging(long deltaMillis) {
-        this.agingTimeMillis += deltaMillis;
-    }
-
-    public EmergencyStatus getStatus() {
-        return status;
-    }
-
-    public void close() {
-        this.status = EmergencyStatus.CLOSED;
+        updateStatus();
     }
 
     // aggiorna lo stato dell'emergenza
     private void updateStatus() {
-        int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); // recupera il numero totale di veicoli richiesti per l'emergenza
-
-        if (assignedVehicles.isEmpty()) { // se non sono stati assegnati veicoli all'emergenza
-            this.status = EmergencyStatus.QUEUED;
+        int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum();
+        EmergencyStatus newStatus;
+        if (isFullyServed()) { // se tutti i veicoli richiesti hanno completato l'intervento
+            newStatus = EmergencyStatus.CLOSED;
+        } else if (assignedVehicles.isEmpty()) { // se non sono stati assegnati veicoli all'emergenza
+            newStatus = EmergencyStatus.QUEUED;
         } else if (assignedVehicles.size() < totalRequired) { // se sono stati assegnati solo alcuni veicoli all'emergenza
-            this.status = EmergencyStatus.PARTIALLY_ASSIGNED;
+            newStatus = EmergencyStatus.PARTIALLY_ASSIGNED;
         } else {
-            this.status = EmergencyStatus.ASSIGNED;
+            newStatus = EmergencyStatus.ASSIGNED;
         }
+        updateAging(newStatus); // va chiamato prima di assegnare il nuovo stato: confronta il vecchio stato con il nuovo
+        this.status = newStatus;
+    }
+
+    // aggiorna l'aging
+    private void updateAging(EmergencyStatus newStatus) {
+        boolean wasWaiting = isWaiting(this.status);
+        boolean nowWaiting = isWaiting(newStatus);
+        long now = System.currentTimeMillis();
+        if (wasWaiting && !nowWaiting) { // l'emergenza smette di aspettare: salva l'aging accumulato fin qui
+            if (agingSince != null) {
+                agingTime = agingTime + (now - agingSince);
+            }
+            agingSince = null;
+        } else if (!wasWaiting && nowWaiting) { // veicolo dirottato: l'emergenza torna ad aspettare
+            agingSince = now;
+        }
+    }
+
+    private static boolean isWaiting(EmergencyStatus status) {
+        return status == EmergencyStatus.QUEUED || status == EmergencyStatus.PARTIALLY_ASSIGNED;
     }
 
     // verifica se tutti i veicoli richiesti hanno completato il proprio intervento
     private boolean isFullyServed() {
         int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum(); // recupera il numero totale di veicoli richiesti per l'emergenza
         return completedVehicleCount >= totalRequired;
+    }
+
+    // ricostruisce un'emergenza salvata nel db prima del crash, con lo stato e l'aging che aveva
+    public static Emergency restore(EmergencyId id, EmergencyType type, Position position, ZoneId zone, Instant localTimestamp, Severity severity, List<VehicleRequirement> requiredVehicles, List<VehicleId> assignedVehicles, long agingAtSave, long savedAtMillis, EmergencyStatus status, int completedVehicleCount) {
+        Emergency emergency = new Emergency(id, type, position, zone, localTimestamp);
+        emergency.severity = severity;
+        emergency.requiredVehicles = new ArrayList<>(requiredVehicles);
+        emergency.assignedVehicles.addAll(assignedVehicles);
+        emergency.status = status;
+        emergency.completedVehicleCount = completedVehicleCount;
+        long now = System.currentTimeMillis();
+        if (isWaiting(status)) { // l'emergenza stava aspettando: il tempo trascorso dal salvataggio (anche durante il crash) conta come aging
+            emergency.agingTime = agingAtSave + (now - savedAtMillis); // aggiorna l'aging: aging = aging gia accumulato preso dal db + tempo trascorso dal salvataggio dell'aging precedente
+            emergency.agingSince = now;
+        } else { // l'emergenza non stava aspettando: l'aging resta fermo
+            emergency.agingTime = agingAtSave;
+            emergency.agingSince = null;
+        }
+        return emergency;
     }
 }

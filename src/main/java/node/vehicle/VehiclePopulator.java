@@ -15,8 +15,6 @@ import java.nio.file.Path;
 //legge il file di configurazione dei veicoli e popola la zona con i veicoli
 public class VehiclePopulator {
 
-    private static final double INITIAL_BATTERY_LEVEL = 100.0;
-
     public static void populate(ZoneState zoneState, Path configPath) {
         JsonObject root;
         try {
@@ -40,7 +38,7 @@ public class VehiclePopulator {
                 JsonObject posJson = positions.getJsonObject(i); // prende il contenuto in json
                 Position position = new Position(posJson.getDouble("lat"), posJson.getDouble("lon")); // converte il json nel valore Position di dominio
                 VehicleId vehicleId = new VehicleId(zoneId.value() + "-" + category.name() + "-" + i); // costruisce un id univoco combinando zona + categoria + indice, es. "zone-0-0-AMBULANCE-0"
-                Vehicle vehicle = new Vehicle(vehicleId, category, zoneId, position, INITIAL_BATTERY_LEVEL); // crea il veicolo vero e proprio con batteria piena
+                Vehicle vehicle = new Vehicle(vehicleId, category, zoneId, position, Vehicle.MAX_BATTERY_LEVEL); // crea il veicolo vero e proprio con batteria piena
                 zoneState.addVehicle(vehicle); // aggiunge il veicolo alla zona
             }
         }

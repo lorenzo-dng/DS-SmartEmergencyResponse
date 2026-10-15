@@ -5,7 +5,6 @@ import domain.vehicle.VehicleCategory;
 import domain.vehicle.VehicleId;
 import io.vertx.core.json.JsonObject;
 
-// contractor -> initiator: un veicolo prestato ha terminato il proprio intervento sulla scena
 public record InterventionCompleted(EmergencyId emergencyId, VehicleId vehicleId, VehicleCategory category) {
 
     public JsonObject toJson() {

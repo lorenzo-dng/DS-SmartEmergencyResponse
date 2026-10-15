@@ -28,17 +28,20 @@ public class Main {
         if (myZone == null) {
             throw new IllegalStateException("Zone not found in computed grid: " + myZoneId);
         }
-        LoanRepository loanRepository = new LoanRepository(config.pendingLoansDbPath()); // inizializza il repository dei prestiti cross-zona
-        CheckpointRepository checkpointRepository = new CheckpointRepository(config.pendingLoansDbPath()); // inizializza il repository dei checkpoint dei veicoli
-        ZoneState zoneState = new ZoneState(myZone, loanRepository, checkpointRepository); //inizializza lo stato della zona
+        SqliteDatabase database = new SqliteDatabase(config.dbPath());
+        LoanRepository loanRepository = new LoanRepository(database); // inizializza il repository dei prestiti cross-zona
+        VehicleRepository vehicleRepository = new VehicleRepository(database);
+        EmergencyRepository emergencyRepository = new EmergencyRepository(database);
+        ZoneState zoneState = new ZoneState(myZone, database, loanRepository, vehicleRepository, emergencyRepository); //inizializza lo stato della zona
         VehiclePopulator.populate(zoneState, Path.of(config.vehiclesConfigPath())); // popola i veicoli iniziali della zona
+        zoneState.restoreEmergencies(); // ricarica dal db le emergenze aperte (è fondamentale che sia qui e non nel verticle perche è un'operazione bloccante dato che accede al db, e l'event loop non dovrebbe mai bloccarsi)
 
         Vertx vertx = Vertx.vertx();
         InterventionNotifier interventionNotifier = new InterventionNotifier(vertx, config::addressFor, zoneState, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
         ArrivalNotifier arrivalNotifier = new ArrivalNotifier(vertx, config::addressFor, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
         SceneDeadlineNotifier sceneDeadlineNotifier = new SceneDeadlineNotifier(vertx, config::addressFor, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
-        VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, interventionNotifier, checkpointRepository, arrivalNotifier, sceneDeadlineNotifier);
-        vertx.deployVerticle(new NodeServer(config.httpPort(), zoneState, config.reservationTimeoutMs(), checkpointRepository, lifecycleManager)) // avvia il server http
+        VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, interventionNotifier, vehicleRepository, arrivalNotifier, sceneDeadlineNotifier);
+        vertx.deployVerticle(new NodeServer(config.httpPort(), zoneState, config.reservationTimeoutMs(), vehicleRepository, lifecycleManager)) // avvia il server http
                 .onSuccess(deploymentId -> { // se ha avuto successo
                     System.out.println("Node started for zone " + myZoneId.value() + " (row=" + config.zoneRow() + ", col=" + config.zoneCol() + ")" + " listening on port " + config.httpPort());
                     NeighborHealth neighborHealth = new NeighborHealth(myZone.getNeighbors());
@@ -52,7 +55,7 @@ public class Main {
 
                     // ripristina le informazioni dei veicoli
 
-                    for (VehicleCheckpoint checkpoint : checkpointRepository.loadAll()) { // recupera dal db l'ultimo stato noto dei veicoli non AVAILABLE al momento del crash e li ricostruisce
+                    for (VehicleCheckpoint checkpoint : vehicleRepository.loadAll()) { // recupera dal db l'ultimo stato noto dei veicoli non AVAILABLE al momento del crash e li ricostruisce
                         Vehicle vehicle = zoneState.getVehicle(checkpoint.vehicleId());
                         vehicle.setStatus(checkpoint.status());
                         vehicle.setPosition(checkpoint.currentPosition());
