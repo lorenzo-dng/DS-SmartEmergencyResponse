@@ -47,7 +47,7 @@ public class EmergencyRepository {
                 "local_timestamp TEXT NOT NULL," +
                 "severity TEXT," +
                 "status TEXT NOT NULL," +
-                "completed_vehicle_count INTEGER NOT NULL," +
+                "completed_vehicles TEXT NOT NULL," +
                 "aging_millis INTEGER NOT NULL," + // aging totale al momento del salvataggio
                 "saved_at INTEGER NOT NULL," + // istante del salvataggio dell'aging (serve a recuperare il tempo trascorso durante un crash)
                 "required_vehicles TEXT NOT NULL," +
@@ -66,7 +66,7 @@ public class EmergencyRepository {
     public void save(Connection conn, Emergency emergency, Map<VehicleId, BorrowedVehicleInfo> borrowedVehicles, Map<VehicleCategory, List<VehicleId>> arrivals) throws SQLException {
         // query sql
         String sql = "INSERT OR REPLACE INTO emergencies" +
-                "(id, type, lat, lon, zone_id, local_timestamp, severity, status, completed_vehicle_count, aging_millis, saved_at, required_vehicles, assigned_vehicles, borrowed_vehicles, arrivals)" + // colonne
+                "(id, type, lat, lon, zone_id, local_timestamp, severity, status, completed_vehicles, aging_millis, saved_at, required_vehicles, assigned_vehicles, borrowed_vehicles, arrivals)" + // colonne
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; // valori ancora da specificare (segnaposti)
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, emergency.getId().value()); // riempie il primo segnaposto
@@ -81,7 +81,7 @@ public class EmergencyRepository {
                 ps.setNull(7, Types.VARCHAR);
             }
             ps.setString(8, emergency.getStatus().name());
-            ps.setInt(9, emergency.getCompletedVehicleCount());
+            ps.setString(9, completedToJson(emergency.getCompletedVehicles()));
             ps.setLong(10, emergency.getAgingTime()); // aging totale adesso
             ps.setLong(11, System.currentTimeMillis()); // istante del salvataggio
             ps.setString(12, requirementsToJson(emergency.getRequiredVehicles()));
@@ -104,7 +104,7 @@ public class EmergencyRepository {
     // ricarica tutte le emergenze aperte al riavvio del nodo dopo il crash
     public List<EmergencySnapshot> loadAll() {
         List<EmergencySnapshot> snapshots = new ArrayList<>();
-        String sql = "SELECT id, type, lat, lon, zone_id, local_timestamp, severity, status, completed_vehicle_count, aging_millis, saved_at, required_vehicles, assigned_vehicles, borrowed_vehicles, arrivals FROM emergencies"; // query sql
+        String sql = "SELECT id, type, lat, lon, zone_id, local_timestamp, severity, status, completed_vehicles, aging_millis, saved_at, required_vehicles, assigned_vehicles, borrowed_vehicles, arrivals FROM emergencies"; // query sql
         try (Connection conn = database.open();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) { // esegue la query e restituisce i risultati delle colonne (righe)
@@ -122,7 +122,7 @@ public class EmergencyRepository {
                         rs.getLong("aging_millis"),
                         rs.getLong("saved_at"),
                         EmergencyStatus.valueOf(rs.getString("status")),
-                        rs.getInt("completed_vehicle_count"));
+                        completedFromJson(rs.getString("completed_vehicles")));
                 snapshots.add(new EmergencySnapshot(emergency, borrowedFromJson(rs.getString("borrowed_vehicles")), arrivalsFromJson(rs.getString("arrivals"))));
             }
         } catch (SQLException e) {
@@ -151,6 +151,14 @@ public class EmergencyRepository {
             array.add(vehicleId.value());
         }
         return array;
+    }
+
+    private static String completedToJson(Map<VehicleCategory, Integer> completedVehicles) {
+        JsonArray array = new JsonArray();
+        for (Map.Entry<VehicleCategory, Integer> entry : completedVehicles.entrySet()) {
+            array.add(new JsonObject().put("category", entry.getKey().name()).put("count", entry.getValue()));
+        }
+        return array.encode();
     }
 
     private static String arrivalsToJson(Map<VehicleCategory, List<VehicleId>> arrivals) {
@@ -192,13 +200,22 @@ public class EmergencyRepository {
         return vehicleIds;
     }
 
+    private static Map<VehicleCategory, Integer> completedFromJson(String json) {
+        JsonArray array = new JsonArray(json);
+        Map<VehicleCategory, Integer> completedVehicles = new HashMap<>();
+        for (int i = 0; i < array.size(); i++) {
+            JsonObject object = array.getJsonObject(i);
+            completedVehicles.put(VehicleCategory.valueOf(object.getString("category")), object.getInteger("count"));
+        }
+        return completedVehicles;
+    }
+
     private static Map<VehicleId, BorrowedVehicleInfo> borrowedFromJson(String json) {
         JsonArray array = new JsonArray(json);
         Map<VehicleId, BorrowedVehicleInfo> borrowedVehicles = new HashMap<>();
         for (int i = 0; i < array.size(); i++) {
             JsonObject object = array.getJsonObject(i);
-            borrowedVehicles.put(new VehicleId(object.getString("vehicleId")),
-                    new BorrowedVehicleInfo(VehicleCategory.valueOf(object.getString("category")), new ZoneId(object.getString("contractorZoneId"))));
+            borrowedVehicles.put(new VehicleId(object.getString("vehicleId")), new BorrowedVehicleInfo(VehicleCategory.valueOf(object.getString("category")), new ZoneId(object.getString("contractorZoneId"))));
         }
         return borrowedVehicles;
     }

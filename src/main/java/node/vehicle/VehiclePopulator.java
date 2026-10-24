@@ -12,7 +12,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
-//legge il file di configurazione dei veicoli e popola la zona con i veicoli
+// legge il file di configurazione dei veicoli e popola la zona con i veicoli
 public class VehiclePopulator {
 
     public static void populate(ZoneState zoneState, Path configPath) {

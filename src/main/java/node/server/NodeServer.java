@@ -53,7 +53,7 @@ public class NodeServer extends VerticleBase {
         router.post("/contract-net/call-for-proposal").handler(this::handleCallForProposal);
         router.post("/contract-net/resolution").handler(this::handleContractResolution);
         router.post("/contract-net/arrived-on-scene").handler(this::handleArrivedOnScene);
-        router.post("/contract-net/scene-deadline").handler(this::handleSceneDeadline);
+        router.post("/contract-net/on-scene-deadline").handler(this::handleOnSceneDeadline);
         router.post("/contract-net/intervention-completed").handler(this::handleInterventionCompleted);
 
         // crea e avvia il server http vertx in ascolto sulla porta indicata
@@ -142,15 +142,15 @@ public class NodeServer extends VerticleBase {
     private void handleArrivedOnScene(RoutingContext ctx) {
         ArrivedOnScene notification = ArrivedOnScene.fromJson(ctx.body().asJsonObject());
         Emergency emergency = zoneState.getEmergency(notification.emergencyId()).orElseThrow(() -> new IllegalArgumentException("Emergency not found in this zone: " + notification.emergencyId()));
-        lifecycleManager.handleSceneArrival(emergency, notification.category(), notification.vehicleId(), System.currentTimeMillis());
+        lifecycleManager.handleOnSceneArrival(emergency, notification.category(), notification.vehicleId(), System.currentTimeMillis());
         ctx.response().setStatusCode(200).end();
     }
 
     // contractor
 
     // gestisce la ricezione della notifica del tempo di completamento previsto per il veicolo prestato
-    private void handleSceneDeadline(RoutingContext ctx) {
-        SceneDeadline notification = SceneDeadline.fromJson(ctx.body().asJsonObject());
+    private void handleOnSceneDeadline(RoutingContext ctx) {
+        OnSceneDeadline notification = OnSceneDeadline.fromJson(ctx.body().asJsonObject());
         lifecycleManager.scheduleBorrowedCompletion(notification.vehicleId(), notification.deadlineMillis());
         ctx.response().setStatusCode(200).end();
     }
@@ -162,11 +162,10 @@ public class NodeServer extends VerticleBase {
         InterventionCompleted notification = InterventionCompleted.fromJson(ctx.body().asJsonObject());
         Optional<Emergency> emergency = zoneState.getEmergency(notification.emergencyId()); // recupera l'id dell'emergenza
         if (emergency.isPresent()) { // se l'emergenza è ancora aperta
-            emergency.get().markVehicleCompleted(notification.vehicleId()); // segna che il veicolo ha completato l'intervento sull'emergenza
+            emergency.get().markVehicleCompleted(notification.vehicleId(), notification.category()); // segna che il veicolo ha completato l'intervento sull'emergenza
             zoneState.removeBorrowedVehicle(notification.vehicleId(), notification.emergencyId());
             zoneState.saveEmergency(emergency.get()); // salva lo stato aggiornato dell'emergenza nel db
         }
-        zoneState.removeBorrowedVehicle(notification.vehicleId(), notification.emergencyId());
         ctx.response().setStatusCode(200).end();
     }
 }

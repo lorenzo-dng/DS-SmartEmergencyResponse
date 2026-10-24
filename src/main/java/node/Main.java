@@ -68,16 +68,16 @@ public class Main {
                         // si coordina sulla fine dell'intervento
 
                         long referenceTime = checkpoint.checkpointAtMillis(); // prende l'orario dell'ultimo salvataggio del checkpoint
-                        if (checkpoint.status() == VehicleStatus.ON_SCENE && checkpoint.sceneStartedAtMillis() != null) { // se il veicolo era sull'emergenza e quindi stava iniziando l'intervento
+                        if (checkpoint.status() == VehicleStatus.ON_SCENE && checkpoint.onSceneStartedAtMillis() != null) { // se il veicolo era sull'emergenza e quindi stava iniziando l'intervento
                             /*
                             registra il momento di inizio intervento del veicolo sull'emergenza, per non perderlo nel caso nel caso in cui l'intervento non si è concluso e si verifichi un secondo crash
                             (senza questo salvataggio, la mappa che viene utilizzata in checkpointAllVehicles per il salvataggio del checkpoint sarebbe vuota - il nodo è stato resettato dopo il riavvio dal crash - e quindi non saprebbe da quale momento l'intervento del veicolo è iniziato)
                              */
-                            lifecycleManager.registerSceneStart(checkpoint.vehicleId(), checkpoint.sceneStartedAtMillis());
-                            if (checkpoint.sceneDeadlineMillis() != null) {
-                                lifecycleManager.registerSceneDeadline(checkpoint.vehicleId(), checkpoint.sceneDeadlineMillis()); // registra il momento di fine intervento effettivo, per non perderlo nel caso nel caso in cui l'intervento non si è concluso e si verifichi un secondo crash
+                            lifecycleManager.registerOnSceneStart(checkpoint.vehicleId(), checkpoint.onSceneStartedAtMillis());
+                            if (checkpoint.onSceneDeadlineMillis() != null) {
+                                lifecycleManager.registerOnSceneDeadline(checkpoint.vehicleId(), checkpoint.onSceneDeadlineMillis()); // registra il momento di fine intervento effettivo, per non perderlo nel caso nel caso in cui l'intervento non si è concluso e si verifichi un secondo crash
                             }
-                            referenceTime = checkpoint.sceneStartedAtMillis(); // prende il tempo dall'inizio reale dell'intervento sull'emergenza
+                            referenceTime = checkpoint.onSceneStartedAtMillis(); // prende il tempo dall'inizio reale dell'intervento sull'emergenza
                         }
                         long elapsedMs = now - referenceTime; // tempo trascorso durante il crash
                         lifecycleManager.recoverVehicle(vehicle, elapsedMs); // ricostruisce il comportamento del veicolo durante il crash

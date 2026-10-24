@@ -1,6 +1,6 @@
 package node.zone;
 
-import communication.contractnet.SceneDeadline;
+import communication.contractnet.OnSceneDeadline;
 import domain.emergency.EmergencyId;
 import domain.vehicle.VehicleId;
 import domain.zone.ZoneId;
@@ -30,9 +30,9 @@ public class SceneDeadlineNotifier {
     }
 
     private void attemptSend(EmergencyId emergencyId, ZoneId contractorZoneId, VehicleId vehicleId, long deadlineMillis) {
-        SceneDeadline message = new SceneDeadline(emergencyId, vehicleId, deadlineMillis);
+        OnSceneDeadline message = new OnSceneDeadline(emergencyId, vehicleId, deadlineMillis);
         String address = addressResolver.apply(contractorZoneId);
-        webClient.postAbs("http://" + address + "/contract-net/scene-deadline").sendJsonObject(message.toJson())
+        webClient.postAbs("http://" + address + "/contract-net/on-scene-deadline").sendJsonObject(message.toJson())
                 .onSuccess(response -> {}) // ack arrivato
                 .onFailure(err -> vertx.setTimer(retryIntervalMs, id -> attemptSend(emergencyId, contractorZoneId, vehicleId, deadlineMillis))); // riprova dopo il timer
     }

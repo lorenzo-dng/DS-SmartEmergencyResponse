@@ -36,7 +36,7 @@ public class EmergencyDispatcher {
     // gestisce l'invio della richiesta di una categoria di veicolo alle zone vicine
     private Future<Void> requestProposalsForCategory(Emergency emergency, VehicleCategory category) {
         int missing = zoneState.missingCount(emergency, category); // recupera il numero di veicoli di una categoria ancora da assegnare
-        if (missing <= 0) { // se non ce ne sono, allora termina
+        if (missing == 0) { // se non ce ne sono, allora termina
             return Future.succeededFuture();
         }
         // altrimenti, esegue una richiesta cross-zona ai vicini
@@ -56,7 +56,7 @@ public class EmergencyDispatcher {
                     .thenComparing(Comparator.comparingDouble(FlatOffer::batteryLevel).reversed()) // a parità: ordina i veicoli in base alla maggiore batteria residua
                     .thenComparingInt(offer -> offer.vehicleId().value().hashCode()) // tie-breaker finale
             );
-            List<FlatOffer> selected = flatOffers.stream().limit(stillMissing).collect(Collectors.toList()); // prende solo i primi veicoli nel numero mancante
+            List<FlatOffer> selected = flatOffers.stream().limit(stillMissing).toList(); // prende solo i primi veicoli nel numero mancante
             for (FlatOffer offer : selected) { // per ogni offerta di veicolo
                 zoneState.addBorrowedVehicle(offer.vehicleId(), emergency.getId(), category, offer.contractorZoneId());
                 emergency.addAssignedVehicle(offer.vehicleId()); // aggiunge il veicolo tra quelli assegnati all'emergenza
@@ -64,7 +64,7 @@ public class EmergencyDispatcher {
             }
             zoneState.saveEmergency(emergency); // salva i veicoli richiesti nel db prima di inviare la conferma ai contractor, così non vanno persi in caso di crash
         }
-        zoneState.resolveVehicleBackup(emergency.getId(), category, selectedIds.size()); // attiva o rilascia l'eventuale veicolo di backup
+        zoneState.resolveVehicleBackup(emergency.getId(), category); // attiva o rilascia gli eventuali veicoli di backup
         return sendResolutionsToAll(emergency, category, submissions, selectedIds);
     }
 

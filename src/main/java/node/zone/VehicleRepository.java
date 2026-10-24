@@ -34,8 +34,8 @@ public class VehicleRepository {
                 "checkpoint_at INTEGER NOT NULL," +
                 "emergency_id TEXT, " +
                 "requester_zone_id TEXT," +
-                "scene_started_at INTEGER," +
-                "scene_deadline INTEGER)";
+                "on_scene_started_at INTEGER," +
+                "on_scene_deadline INTEGER)";
         try (Connection conn = database.open(); // apre la connessione al database
              Statement stmt = conn.createStatement()) {
             stmt.execute(sql); // crea la tabella
@@ -45,18 +45,18 @@ public class VehicleRepository {
     }
 
     // inserisce o aggiorna lo stato di un veicolo non AVAILABLE
-    public void save(VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long sceneStartedAtMillis, Long sceneDeadlineMillis) {
+    public void save(VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long onSceneStartedAtMillis, Long onSceneDeadlineMillis) {
         try (Connection conn = database.open()) {
-            save(conn, vehicleId, status, position, destination, batteryLevel, loan, sceneStartedAtMillis, sceneDeadlineMillis);
+            save(conn, vehicleId, status, position, destination, batteryLevel, loan, onSceneStartedAtMillis, onSceneDeadlineMillis);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to persist vehicle checkpoint: " + e.getMessage(), e);
         }
     }
 
-    public void save(Connection conn, VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long sceneStartedAtMillis, Long sceneDeadlineMillis) throws SQLException {
+    public void save(Connection conn, VehicleId vehicleId, VehicleStatus status, Position position, Position destination, double batteryLevel, ActiveLoan loan, Long onSceneStartedAtMillis, Long onSceneDeadlineMillis) throws SQLException {
         // query sql
         String sql = "INSERT OR REPLACE INTO vehicle_checkpoints" +
-                "(vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, scene_started_at, scene_deadline)" + // colonne
+                "(vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, on_scene_started_at, on_scene_deadline)" + // colonne
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"; // valori ancora da specificare (segnaposti)
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, vehicleId.value()); // riempie il primo segnaposto
@@ -79,13 +79,13 @@ public class VehicleRepository {
                 ps.setNull(9, Types.VARCHAR);
                 ps.setNull(10, Types.VARCHAR);
             }
-            if (sceneStartedAtMillis != null) {
-                ps.setLong(11, sceneStartedAtMillis);
+            if (onSceneStartedAtMillis != null) {
+                ps.setLong(11, onSceneStartedAtMillis);
             } else {
                 ps.setNull(11, Types.BIGINT);
             }
-            if (sceneDeadlineMillis != null) {
-                ps.setLong(12, sceneDeadlineMillis);
+            if (onSceneDeadlineMillis != null) {
+                ps.setLong(12, onSceneDeadlineMillis);
             } else {
                 ps.setNull(12, Types.BIGINT);
             }
@@ -113,7 +113,7 @@ public class VehicleRepository {
     // ricarica tutti i checkpoint al riavvio del nodo dopo il crash
     public List<VehicleCheckpoint> loadAll() {
         List<VehicleCheckpoint> checkpoints = new ArrayList<>();
-        String sql = "SELECT vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, scene_started_at, scene_deadline FROM vehicle_checkpoints"; // query sql
+        String sql = "SELECT vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, on_scene_started_at, on_sscene_deadline FROM vehicle_checkpoints"; // query sql
         try (Connection conn = database.open();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) { // esegue la query e restituisce i risultati delle colonne (righe)
@@ -124,13 +124,13 @@ public class VehicleRepository {
                     destination = new Position(destLat, rs.getDouble("dest_lon"));
                 }
                 String emergencyId = rs.getString("emergency_id");
-                Long sceneStartedAt = rs.getLong("scene_started_at");
-                if (rs.wasNull()) { // se sceneStartedAt è null (e non 0), allora imposta sceneStartedAt a null (ResultSet imposta 0 a un valore null)
-                    sceneStartedAt = null;
+                Long onSceneStartedAt = rs.getLong("on_scene_started_at");
+                if (rs.wasNull()) { // se onSceneStartedAt è null (e non 0), allora imposta onSceneStartedAt a null (ResultSet imposta 0 a un valore null)
+                    onSceneStartedAt = null;
                 }
-                Long sceneDeadline = rs.getLong("scene_deadline");
+                Long onSceneDeadline = rs.getLong("on_scene_deadline");
                 if (rs.wasNull()) {
-                    sceneDeadline = null;
+                    onSceneDeadline = null;
                 }
                 checkpoints.add(new VehicleCheckpoint(
                         new VehicleId(rs.getString("vehicle_id")),
@@ -141,8 +141,8 @@ public class VehicleRepository {
                         rs.getLong("checkpoint_at"),
                         emergencyId != null ? new EmergencyId(emergencyId) : null,
                         emergencyId != null ? new ZoneId(rs.getString("requester_zone_id")) : null,
-                        sceneStartedAt,
-                        sceneDeadline));
+                        onSceneStartedAt,
+                        onSceneDeadline));
             }
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to load vehicle checkpoints: " + e.getMessage(), e);
