@@ -2,6 +2,8 @@ package node;
 
 import communication.NeighborHealth;
 import communication.contractnet.ContractNetNodeClient;
+import communication.handoff.InterventionCompleted;
+import communication.handoff.NodeClient;
 import domain.vehicle.Vehicle;
 import domain.vehicle.VehicleStatus;
 import domain.zone.Zone;
@@ -37,18 +39,18 @@ public class Main {
         zoneState.restoreEmergencies(); // ricarica dal db le emergenze aperte (è fondamentale che sia qui e non nel verticle perche è un'operazione bloccante dato che accede al db, e l'event loop non dovrebbe mai bloccarsi)
 
         Vertx vertx = Vertx.vertx();
-        InterventionNotifier interventionNotifier = new InterventionNotifier(vertx, config::addressFor, zoneState, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
-        ArrivalNotifier arrivalNotifier = new ArrivalNotifier(vertx, config::addressFor, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
-        SceneDeadlineNotifier sceneDeadlineNotifier = new SceneDeadlineNotifier(vertx, config::addressFor, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
-        VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, interventionNotifier, vehicleRepository, arrivalNotifier, sceneDeadlineNotifier);
+
+        NeighborHealth neighborHealth = new NeighborHealth(myZone.getNeighbors());
+        NodeClient nodeClient = new NodeClient(vertx, config::addressFor, neighborHealth, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
+        VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, vehicleRepository, nodeClient);
         vertx.deployVerticle(new NodeServer(config.httpPort(), zoneState, config.reservationTimeoutMs(), vehicleRepository, lifecycleManager)) // avvia il server http
                 .onSuccess(deploymentId -> { // se ha avuto successo
                     System.out.println("Node started for zone " + myZoneId.value() + " (row=" + config.zoneRow() + ", col=" + config.zoneCol() + ")" + " listening on port " + config.httpPort());
-                    NeighborHealth neighborHealth = new NeighborHealth(myZone.getNeighbors());
                     ContractNetNodeClient contractNetClient = new ContractNetNodeClient(vertx, config::addressFor, neighborHealth, config.neighborTimeoutMs());
                     // TODO: usare contractNetClient.callForProposals(...) nella logica di gestione emergenze quando un'emergenza resta senza veicolo locale disponibile
                     for (PendingLoan loan : zoneState.loadPendingLoans()) { // ogni volta che il nodo si riavvia dopo il crash, recupera dal db i prestiti in sospeso
-                        interventionNotifier.notifyCompletion(loan.emergencyId(), loan.requesterZoneId(), loan.vehicleId(), loan.category()); // notifica all'initiator il completamento dell'intervento del veicolo sull'emergenza
+                        InterventionCompleted completionMessage = new InterventionCompleted(loan.emergencyId(), loan.vehicleId(), loan.category());
+                        nodeClient.notifyCompletion(loan.requesterZoneId(), completionMessage, () -> zoneState.deletePendingLoan(loan.vehicleId(), loan.emergencyId())); // notifica all'initiator il completamento dell'intervento del veicolo sull'emergenza
                     }
 
                     long now = System.currentTimeMillis(); // orario attuale

@@ -1,10 +1,12 @@
 package node.server;
 
 import communication.contractnet.*;
+import communication.handoff.ArrivedOnScene;
+import communication.handoff.InterventionCompleted;
+import communication.handoff.OnSceneDeadline;
 import domain.common.Position;
 import domain.emergency.Emergency;
 import domain.emergency.EmergencyId;
-import domain.emergency.EmergencyStatus;
 import domain.utils.GeoUtils;
 import domain.vehicle.Vehicle;
 import domain.vehicle.VehicleCategory;

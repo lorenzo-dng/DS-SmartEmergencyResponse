@@ -1,4 +1,4 @@
-package communication.contractnet;
+package communication.handoff;
 
 import domain.emergency.EmergencyId;
 import domain.vehicle.VehicleCategory;

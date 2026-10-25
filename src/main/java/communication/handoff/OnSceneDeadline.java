@@ -1,23 +1,22 @@
-package communication.contractnet;
+package communication.handoff;
 
 import domain.emergency.EmergencyId;
-import domain.vehicle.VehicleCategory;
 import domain.vehicle.VehicleId;
 import io.vertx.core.json.JsonObject;
 
-public record ArrivedOnScene(EmergencyId emergencyId, VehicleId vehicleId, VehicleCategory category) {
+public record OnSceneDeadline(EmergencyId emergencyId, VehicleId vehicleId, long deadlineMillis) {
 
     public JsonObject toJson() {
         return new JsonObject()
                 .put("emergencyId", emergencyId.value())
                 .put("vehicleId", vehicleId.value())
-                .put("category", category.name());
+                .put("deadlineMillis", deadlineMillis);
     }
 
-    public static ArrivedOnScene fromJson(JsonObject json) {
-        return new ArrivedOnScene(
+    public static OnSceneDeadline fromJson(JsonObject json) {
+        return new OnSceneDeadline(
                 new EmergencyId(json.getString("emergencyId")),
                 new VehicleId(json.getString("vehicleId")),
-                VehicleCategory.valueOf(json.getString("category")));
+                json.getLong("deadlineMillis"));
     }
 }

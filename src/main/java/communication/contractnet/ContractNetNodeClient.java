@@ -6,6 +6,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.ext.web.client.WebClient;
 import io.vertx.ext.web.client.WebClientOptions;
+
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -34,6 +35,7 @@ public class ContractNetNodeClient {
                         .map(neighborId -> requestProposal(neighborId, cfp)) // per ogni vicino, chiama il metodo
                         .collect(Collectors.toList()); // recupera tutte le risposte ricevute e le mette nella lista requests
         return Future.join(requests) // attende che tutte le future contenute in request (e generate dai vicini) siano state completate
+                .recover(err -> Future.succeededFuture()) // gestisce un fallimento: quando un vicino non risponde si prosegue comunque, e il filtro successivo scarta le richieste fallite
                 .map(composite -> requests.stream() // trasforma la lista requests in uno stream (per poter eseguire le operazioni successive)
                         .filter(Future::succeeded) // filtra solo le risposte ricevute con successo
                         .map(Future::result) // da ogni future, estrai il valore contenuto
@@ -46,16 +48,16 @@ public class ContractNetNodeClient {
     private Future<Optional<ProposalSubmission>> requestProposal(ZoneId neighborId, CallForProposal cfp) {
         String address = addressResolver.apply(neighborId); // recupera l'indirizzo della zona vicina (tramite il suo id)
         return webClient.postAbs("http://" + address + "/contract-net/call-for-proposal").timeout(timeoutMs).sendJsonObject(cfp.toJson()) // invia una richiesta http POST alla zona vicina
+                .onSuccess(response -> neighborHealth.markReachable(neighborId)) // se riceve una risposta (qualunque codice), contrassegna il vicino come raggiungibile
+                .onFailure(err -> neighborHealth.markUnreachable(neighborId)) // se non riceve la risposta entro il timeout (o presenta errori), contrassegna il vicino come non raggiungibile
                 .compose(response -> { // se riceve la risposta
-                    neighborHealth.markReachable(neighborId); // contrassegna il vicino come raggiungibile
+                    if (response.statusCode() == 200) { // il contractor ha inviato una proposta
+                        return Future.succeededFuture(Optional.of(ProposalSubmission.fromJson(response.bodyAsJsonObject()))); // restituisce un optional con la proposta
+                    }
                     if (response.statusCode() == 204) {
                         return Future.succeededFuture(Optional.<ProposalSubmission>empty()); //restituisce un optional empty, a indicare che la risposta è avvenuta con successo ma con codice 204
                     }
-                    return Future.succeededFuture(Optional.of(ProposalSubmission.fromJson(response.bodyAsJsonObject()))); // altrimenti, restituisce un optional
-                })
-                .recover(err -> { // se non riceve la risposta entro il timeout (o presenta errori)
-                    neighborHealth.markUnreachable(neighborId); // contrassegna il vicino come non raggiungibile
-                    return Future.failedFuture(err);
+                    return Future.failedFuture("Unexpected status " + response.statusCode() + " from zone " + neighborId.value()); // qualunque altro codice è un fallimento: la proposta non viene considerata
                 });
     }
 
@@ -63,13 +65,8 @@ public class ContractNetNodeClient {
     public Future<Void> sendResolution(ContractResolution resolution, ZoneId contractorId) {
         String address = addressResolver.apply(contractorId);
         return webClient.postAbs("http://" + address + "/contract-net/resolution").timeout(timeoutMs).sendJsonObject(resolution.toJson())
-                .compose(response -> {
-                    neighborHealth.markReachable(contractorId);
-                    return Future.<Void>succeededFuture();
-                })
-                .recover(err -> {
-                    neighborHealth.markUnreachable(contractorId);
-                    return Future.failedFuture(err);
-                });
+                .onSuccess(response -> neighborHealth.markReachable(contractorId))
+                .onFailure(err -> neighborHealth.markUnreachable(contractorId))
+                .compose(response -> response.statusCode() >= 200 && response.statusCode() < 300 ? Future.succeededFuture() : Future.failedFuture("Unexpected status " + response.statusCode() + " from zone " + contractorId.value() + " for the resolution"));
     }
 }

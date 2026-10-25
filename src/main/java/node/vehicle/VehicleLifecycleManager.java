@@ -1,5 +1,9 @@
 package node.vehicle;
 
+import communication.handoff.ArrivedOnScene;
+import communication.handoff.InterventionCompleted;
+import communication.handoff.NodeClient;
+import communication.handoff.OnSceneDeadline;
 import domain.common.Position;
 import domain.emergency.Emergency;
 import domain.utils.GeoUtils;
@@ -25,20 +29,16 @@ public class VehicleLifecycleManager {
     private static final long ON_SCENE_DURATION_MS = 2000; // durata dell'intervento
     private final ZoneState zoneState;
     private final Vertx vertx;
-    private final InterventionNotifier interventionNotifier;
     private final VehicleRepository vehicleRepository;
-    private final ArrivalNotifier arrivalNotifier;
+    private final NodeClient nodeClient;
     private final Map<VehicleId, Long> onSceneStartedAt; // tiene traccia dell'orario di inizio intervento sull'emergenza, per ricostruire correttamente il tempo residuo dopo un crash
     private final Map<VehicleId, Long> onSceneDeadline; // tiene traccia del tempo di fine intervento di un veicolo (coincide con il tempo di fine intervento di tutti i veicoli della stessa cateogria)
-    private final SceneDeadlineNotifier onSceneDeadlineNotifier;
 
-    public VehicleLifecycleManager(ZoneState zoneState, Vertx vertx, InterventionNotifier interventionNotifier, VehicleRepository vehicleRepository, ArrivalNotifier arrivalNotifier, SceneDeadlineNotifier onSceneDeadlineNotifier) {
+    public VehicleLifecycleManager(ZoneState zoneState, Vertx vertx, VehicleRepository vehicleRepository, NodeClient nodeClient) {
         this.zoneState = zoneState;
         this.vertx = vertx;
-        this.interventionNotifier = interventionNotifier;
         this.vehicleRepository = vehicleRepository;
-        this.arrivalNotifier = arrivalNotifier;
-        this.onSceneDeadlineNotifier = onSceneDeadlineNotifier;
+        this.nodeClient = nodeClient;
         this.onSceneStartedAt = new HashMap<>();
         this.onSceneDeadline = new HashMap<>();
     }
@@ -92,7 +92,8 @@ public class VehicleLifecycleManager {
             vehicle.setStatus(VehicleStatus.ON_SCENE);
             if (loan.isPresent()) { // se il veicolo è stato prestato
                 ActiveLoan activeLoan = loan.get();
-                arrivalNotifier.notifyArrival(activeLoan.emergencyId(), activeLoan.requesterZoneId(), vehicle.getId(), activeLoan.category()); // notifica l'initiator che il veicolo è arrivato sull'emergenza
+                ArrivedOnScene arrivalMessage = new ArrivedOnScene(activeLoan.emergencyId(), vehicle.getId(), activeLoan.category(), zoneState.getZoneId());
+                nodeClient.notifyArrival(activeLoan.requesterZoneId(), arrivalMessage, () -> scheduleBorrowedCompletion(vehicle.getId(), System.currentTimeMillis())); // notifica l'initiator che il veicolo prestato è arrivato sull'emergenza; se l'initiator rifiuta l'arrivo (il veicolo non serve), l'intervento termina subito e il veicolo torna alla base
             } else { // se il veicolo è locale
                 Emergency emergency = zoneState.findAssignedEmergency(vehicle.getId()).orElseThrow(() -> new IllegalStateException("No emergency found for local vehicle on scene: " + vehicle.getId().value()));
                 handleOnSceneArrival(emergency, vehicle.getCategory(), vehicle.getId(), arrivalTime);
@@ -209,7 +210,8 @@ public class VehicleLifecycleManager {
                 vertx.setTimer(delay, id -> onInterventionComplete(groupVehicle)); // imposta il timer dopo il quale il veicolo completa l'emergenza
             } else { // se il veicolo è stato prestato
                 ZoneId contractorZoneId = zoneState.getBorrowedVehicleContractorZone(vehicleId, emergency.getId()).orElseThrow(() -> new IllegalStateException("No contractor zone found for borrowed vehicle: " + vehicleId.value()));
-                onSceneDeadlineNotifier.notifyDeadline(emergency.getId(), contractorZoneId, vehicleId, deadlineMillis); // notifica il tempo di completamento dell'intervento del veicolo al contractor
+                OnSceneDeadline deadlineMessage = new OnSceneDeadline(emergency.getId(), vehicleId, deadlineMillis);
+                nodeClient.notifyDeadline(contractorZoneId, deadlineMessage, () -> { }); // notifica al contractor il tempo di completamento dell'intervento del veicolo prestato
             }
         }
         zoneState.clearOnSceneGroup(emergency.getId(), category);
@@ -235,7 +237,8 @@ public class VehicleLifecycleManager {
             zoneState.savePendingLoan(vehicle.getId()); // salva il prestito nel db (per notificare l'initiator in caso di crash)
             zoneState.closeActiveLoan(vehicle.getId()); // termina il prestito in corso: il veicolo può essere riassegnato dalla propria zona
             prepareForReturn(vehicle, null); // il veicolo torna alla base
-            interventionNotifier.notifyCompletion(loan.emergencyId(), loan.requesterZoneId(), vehicle.getId(), loan.category());
+            InterventionCompleted completionMessage = new InterventionCompleted(loan.emergencyId(), vehicle.getId(), loan.category());
+            nodeClient.notifyCompletion(loan.requesterZoneId(), completionMessage, () -> zoneState.deletePendingLoan(vehicle.getId(), loan.emergencyId())); // notifica l'initiator il completamento dell'intervento del veicolo prestato
         } else { // se il veicolo non era stato prestato
             Emergency emergency = zoneState.findAssignedEmergency(vehicle.getId()).orElseThrow(() -> new IllegalStateException("No emergency found for local vehicle completing intervention: " + vehicle.getId().value()));
             emergency.markVehicleCompleted(vehicle.getId(), vehicle.getCategory());
