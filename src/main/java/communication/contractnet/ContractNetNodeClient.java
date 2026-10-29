@@ -55,7 +55,7 @@ public class ContractNetNodeClient {
                         return Future.succeededFuture(Optional.of(ProposalSubmission.fromJson(response.bodyAsJsonObject()))); // restituisce un optional con la proposta
                     }
                     if (response.statusCode() == 204) {
-                        return Future.succeededFuture(Optional.<ProposalSubmission>empty()); //restituisce un optional empty, a indicare che la risposta è avvenuta con successo ma con codice 204
+                        return Future.succeededFuture(Optional.empty()); // restituisce un optional empty, a indicare che la risposta è avvenuta con successo ma con codice 204
                     }
                     return Future.failedFuture("Unexpected status " + response.statusCode() + " from zone " + neighborId.value()); // qualunque altro codice è un fallimento: la proposta non viene considerata
                 });

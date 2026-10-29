@@ -89,7 +89,16 @@ public class EmergencyDispatcher {
                     .collect(Collectors.toList()); // mette tutto in una nuova lista
             // invia l'esito conclusivo ai contractor
             ContractResolution resolution = new ContractResolution(emergency.getId(), category, zoneState.getZoneId(), confirmed);
-            sendFutures.add(contractNetClient.sendResolution(resolution, submission.contractorZoneId()));
+            ZoneId contractorZoneId = submission.contractorZoneId();
+            sendFutures.add(contractNetClient.sendResolution(resolution, contractorZoneId)
+                    .onSuccess(v -> zoneState.markConfirmationAcked(emergency.getId(), confirmed)) // il contractor ha attivato i veicoli: salva l'ack nel db
+                    .onFailure(err -> { // il contractor non ha confermato (irraggiungibile, timeout o prenotazione non più valida): l'initiator ritira i veicoli di quel contractor
+                        int withdrawn = zoneState.withdrawUnconfirmedVehicles(emergency.getId(), contractorZoneId, category);
+                        if (withdrawn > 0) { // se ci sono veicoli ritirati
+                            System.out.println("Resolution not confirmed by zone " + contractorZoneId.value() + " for emergency " + emergency.getId().value() + " (" + category + "): withdrawn " + withdrawn + " vehicle(s)");
+                        }
+                    })
+                    .recover(err -> Future.succeededFuture())); // trasforma una future fallita (caso .onFailure) in una riuscita, cosi che Future.join finale possa essere eseguito con successo
         }
         return Future.join(sendFutures).mapEmpty(); // attende che tutte le risoluzioni siano state inviate, per poi restituire il risultato
     }

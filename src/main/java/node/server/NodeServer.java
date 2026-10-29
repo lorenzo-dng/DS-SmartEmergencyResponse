@@ -19,6 +19,7 @@ import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import node.vehicle.VehicleLifecycleManager;
 import node.zone.ActiveLoan;
+import node.zone.ArrivalOutcome;
 import node.zone.VehicleRepository;
 import node.zone.ZoneState;
 
@@ -81,7 +82,7 @@ public class NodeServer extends VerticleBase {
                 .thenComparingInt(v -> v.getId().value().hashCode())).toList(); // tie-breaker finale in caso di parità totale
         List<Vehicle> selected = feasible.stream().limit(cfp.requiredCount()).toList(); // dalla lista ordinata, prende i veicoli nel numero richiesto
         if (selected.isEmpty()) { // se non è stato trovato nessun veicolo
-            ctx.response().setStatusCode(204).end(); // indica che la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta (il contractor non risponde)
+            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
             return;
         }
         List<VehicleOffer> offers = new ArrayList<>();
@@ -116,26 +117,32 @@ public class NodeServer extends VerticleBase {
     // riceve l'esito conclusivo di una negoziazione: i veicoli in confirmedVehicleIds vengono assegnati definitivamente, tutti gli altri (della stessa categoria) riservati per questa emergenza vengono rilasciati
     private void handleContractResolution(RoutingContext ctx) {
         ContractResolution resolution = ContractResolution.fromJson(ctx.body().asJsonObject());
-        Optional<List<VehicleId>> allReserved = zoneState.removePendingReservation(resolution.emergencyId(), resolution.category()); // recupera tutti i veicoli riservati per questa negoziazione (se esistono, ovvero se l'initiator comunica entro il timer)
+        Optional<List<VehicleId>> allReserved = zoneState.removePendingReservation(resolution.emergencyId(), resolution.category()); // recupera tutti i veicoli riservati per questa negoziazione
         Optional<Position> emergencyPosition = zoneState.removeEmergencyPosition(resolution.emergencyId(), resolution.category());
-        allReserved.ifPresentOrElse(reservedIds -> { // se sono presenti
-                    for (VehicleId vehicleId : reservedIds) { // per ogni veicolo
-                        Vehicle vehicle = zoneState.getVehicle(vehicleId);
-                        if (resolution.confirmedVehicleIds().contains(vehicleId)) { // se il veicolo è stato confermato
-                            Position destination = emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value()));
-                            ActiveLoan loan = new ActiveLoan(resolution.emergencyId(), resolution.requesterZoneId(), resolution.category());
-                            vehicleRepository.save(vehicleId, VehicleStatus.EN_ROUTE, vehicle.getPosition(), destination, vehicle.getBatteryLevel(), loan, null, null); // salva il checkpoint del veicolo con l'informazione del prestito nel db, così da ripristinarlo in caso di crash
-                            vehicle.setStatus(VehicleStatus.EN_ROUTE);
-                            vehicle.setDestination(emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value())));
-                            zoneState.addActiveLoan(vehicleId, resolution.emergencyId(), resolution.requesterZoneId(), resolution.category()); // salva l'attivazione del prestito
-                        } else { // se il veicolo non è stato confermato
-                            vehicle.setStatus(VehicleStatus.AVAILABLE);
-                        }
-                    }
-                },
-                () -> System.out.println("ContractResolution arrived too late for emergency " + resolution.emergencyId().value() + " (" + resolution.category() + "): reservation already timed out") // se è scaduto il timer
-        );
-        ctx.response().setStatusCode(204).end(); //indica "la richiesta è stata elaborata con successo, ma non c'è nessun contenuto da restituire nel body della risposta" (il contractor non risponde)
+        if (allReserved.isPresent()) { // se la prenotazione esiste ancora (se l'initiator comunica entro il timer)
+            for (VehicleId vehicleId : allReserved.get()) { // per ogni veicolo
+                Vehicle vehicle = zoneState.getVehicle(vehicleId);
+                if (resolution.confirmedVehicleIds().contains(vehicleId)) { // se il veicolo è stato confermato
+                    Position destination = emergencyPosition.orElseThrow(() -> new IllegalStateException("Missing emergency position for confirmed vehicle: " + vehicleId.value()));
+                    ActiveLoan loan = new ActiveLoan(resolution.emergencyId(), resolution.requesterZoneId(), resolution.category());
+                    vehicleRepository.save(vehicleId, VehicleStatus.EN_ROUTE, vehicle.getPosition(), destination, vehicle.getBatteryLevel(), loan, null, null); // salva il checkpoint del veicolo con l'informazione del prestito nel db, così da ripristinarlo in caso di crash
+                    vehicle.setStatus(VehicleStatus.EN_ROUTE);
+                    vehicle.setDestination(destination);
+                    zoneState.addActiveLoan(vehicleId, resolution.emergencyId(), resolution.requesterZoneId(), resolution.category()); // salva l'attivazione del prestito
+                } else { // se il veicolo non è stato confermato
+                    vehicle.setStatus(VehicleStatus.AVAILABLE);
+                }
+            }
+            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
+        } else { // altrimenti, se la prenotazione non esiste più (la conferma era già stata elaborata - l'initiator la rinvia se non ha ricevuto la risposta - oppure è scaduto il timer)
+            boolean alreadyActivated = resolution.confirmedVehicleIds().stream().allMatch(vehicleId -> zoneState.getActiveLoan(vehicleId).map(loan -> loan.emergencyId().equals(resolution.emergencyId())).orElse(false)); // restituisce vero se tutti i veicoli confermati sono già stati attivati per l'emergenza oppure se non è stato confermato nessun veicolo
+            if (alreadyActivated) { // se tutti i veicoli confermati già sono stati attivati o non è stato confermato nessun veicolo
+                ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
+            } else { // altrimenti, è scaduto i timer e i veicoli sono stati rilasciati
+                System.out.println("ContractResolution arrived too late for emergency " + resolution.emergencyId().value() + " (" + resolution.category() + "): reservation already timed out");
+                ctx.response().setStatusCode(410).end(); // invia una risposta negativa: la prenotazione non esiste più
+            }
+        }
     }
 
     // initiator
@@ -143,9 +150,20 @@ public class NodeServer extends VerticleBase {
     // gestisce la ricezione della notifica di arrivo di un veicolo sull'emergenza
     private void handleArrivedOnScene(RoutingContext ctx) {
         ArrivedOnScene notification = ArrivedOnScene.fromJson(ctx.body().asJsonObject());
-        Emergency emergency = zoneState.getEmergency(notification.emergencyId()).orElseThrow(() -> new IllegalArgumentException("Emergency not found in this zone: " + notification.emergencyId()));
-        lifecycleManager.handleOnSceneArrival(emergency, notification.category(), notification.vehicleId(), System.currentTimeMillis());
-        ctx.response().setStatusCode(200).end();
+        Optional<Emergency> emergency = zoneState.getEmergency(notification.emergencyId());
+        if (emergency.isEmpty()) { // se l'emergenza non è più aperta (il veicolo che è arrivato non era previsto, e nel frattempo l'emergenza è stata coperta dalla fase 1,2)
+            ctx.response().setStatusCode(409).end(); // invia una risposta negativa
+        } else { // altrimenti
+            ArrivalOutcome outcome = zoneState.admitArrival(emergency.get(), notification.vehicleId(), notification.category(), notification.contractorZoneId()); // verifica se accettare o meno l'arrivo del veicolo
+            switch (outcome) {
+                case ADMITTED -> {
+                    lifecycleManager.handleOnSceneArrival(emergency.get(), notification.category(), notification.vehicleId(), System.currentTimeMillis());
+                    ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
+                }
+                case ALREADY_COMPLETED -> ctx.response().setStatusCode(200).end(); // notifica duplicata (il contractor non ha ricevuto ancora l'ack)
+                case REJECTED -> ctx.response().setStatusCode(409).end(); // invia una risposta negativa (il contractor libera il veicolo)
+            }
+        }
     }
 
     // contractor
@@ -154,7 +172,7 @@ public class NodeServer extends VerticleBase {
     private void handleOnSceneDeadline(RoutingContext ctx) {
         OnSceneDeadline notification = OnSceneDeadline.fromJson(ctx.body().asJsonObject());
         lifecycleManager.scheduleBorrowedCompletion(notification.vehicleId(), notification.deadlineMillis());
-        ctx.response().setStatusCode(200).end();
+        ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
     }
 
     // initiator
@@ -168,6 +186,6 @@ public class NodeServer extends VerticleBase {
             zoneState.removeBorrowedVehicle(notification.vehicleId(), notification.emergencyId());
             zoneState.saveEmergency(emergency.get()); // salva lo stato aggiornato dell'emergenza nel db
         }
-        ctx.response().setStatusCode(200).end();
+        ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
     }
 }

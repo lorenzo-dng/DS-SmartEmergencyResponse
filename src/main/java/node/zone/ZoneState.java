@@ -10,10 +10,10 @@ import domain.vehicle.VehicleCategory;
 import domain.vehicle.VehicleStatus;
 import domain.utils.GeoUtils;
 import domain.utils.BipartiteMatching;
-
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.function.Function;
 
 // stato della zona
 public class ZoneState {
@@ -59,10 +59,6 @@ public class ZoneState {
         return zone.getId();
     }
 
-    public Zone getZone() {
-        return zone;
-    }
-
     public void addVehicle(Vehicle vehicle) {
         vehicles.put(vehicle.getId(), vehicle);
     }
@@ -79,7 +75,7 @@ public class ZoneState {
 
     // registra un veicolo preso in prestito da un'altra zona
     public void addBorrowedVehicle(VehicleId vehicleId, EmergencyId emergencyId, VehicleCategory category, ZoneId contractorZoneId) {
-        borrowedVehicles.computeIfAbsent(emergencyId, k -> new HashMap<>()).put(vehicleId, new BorrowedVehicleInfo(category, contractorZoneId));
+        borrowedVehicles.computeIfAbsent(emergencyId, k -> new HashMap<>()).put(vehicleId, BorrowedVehicleInfo.requested(category, contractorZoneId));
     }
 
     // rimuove un veicolo preso in prestito da un'altra zona
@@ -105,6 +101,62 @@ public class ZoneState {
         return borrowed == null ? null : borrowed.get(vehicleId);
     }
 
+    // il contractor ha confermato di aver attivato i veicoli: l'initiator salva l'ack nel db in modo da non rinviare la conferma in caso di crash
+    public void markConfirmationAcked(EmergencyId emergencyId, Collection<VehicleId> vehicleIds) {
+        boolean isVehicleChanged = false;
+        for (VehicleId vehicleId : vehicleIds) { // per ogni veicolo confermato
+            if (updateBorrowed(emergencyId, vehicleId, BorrowedVehicleInfo::withConfirmationAcked)) { // aggiorna l'informazione del veicolo con l'ack della conferma del veicolo
+                isVehicleChanged = true;
+            }
+        }
+        if (isVehicleChanged) {
+            saveEmergency(emergencies.get(emergencyId));
+        }
+    }
+
+    // aggiorna (in memoria) il record di un veicolo preso in prestito
+    private boolean updateBorrowed(EmergencyId emergencyId, VehicleId vehicleId, Function<BorrowedVehicleInfo, BorrowedVehicleInfo> update) { // Function è usato per ricevere un metodo come parametro
+        Map<VehicleId, BorrowedVehicleInfo> borrowed = borrowedVehicles.get(emergencyId); // lista di veicoli presi in prestito per un'emergenza
+        if (borrowed == null || !borrowed.containsKey(vehicleId)) { // se non ci sono veicoli presi in prestito per quell'emergenza oppure non esiste uno specifico veicoli tra quelli presi in prestito
+            return false;
+        }
+        // altrimenti
+        borrowed.put(vehicleId, update.apply(borrowed.get(vehicleId))); // aggiorna l'informazione BorrowedVehicleInfo per il veicolo
+        return true;
+    }
+
+    // il contractor ha confermato di aver ricevuto la scadenza dell'intervento del veicolo: l'initiator salva l'ack nel db in modo da non rinviare la scadenza in caso di crash
+    public void markDeadlineAcked(EmergencyId emergencyId, VehicleId vehicleId) {
+        if (updateBorrowed(emergencyId, vehicleId, BorrowedVehicleInfo::withDeadlineAcked)) {  // aggiorna l'informazione del veicolo con l'ack della deadline dell'intervento sull'emergenza
+            saveEmergency(emergencies.get(emergencyId));
+        }
+    }
+
+    // il contractor non ha confermato di aver attivato i veicoli: l'initiator li ritira (li toglie dai veicoli presi in prestito e dai veicoli assegnati all'emergenza) e gli slot dell'emergenza tornano scoperti
+    public int withdrawUnconfirmedVehicles(EmergencyId emergencyId, ZoneId contractorZoneId, VehicleCategory category) {
+        Emergency emergency = emergencies.get(emergencyId);
+        Map<VehicleId, BorrowedVehicleInfo> borrowed = borrowedVehicles.get(emergencyId); // lista di veicoli presi in prestito per un'emergenza
+        if (borrowed == null) { // se l'emergenza non ha veicoli presi in prestito
+            return 0;
+        }
+        List<VehicleId> toWithdraw = new ArrayList<>(); // lista di veicoli da ritirare
+        for (Map.Entry<VehicleId, BorrowedVehicleInfo> entry : borrowed.entrySet()) { // per ogni chiave della lista di veicoli presi in prestito
+            BorrowedVehicleInfo info = entry.getValue(); // prende le info dalla chiave
+            if (info.contractorZoneId().equals(contractorZoneId) && info.category() == category && !info.confirmationAcked()) { // se il contractor corrisponde, la categoria corrisponde, non esiste l'ack (possibile nel caso in cui l'ack del contractor si perde, il veicolo arriva sull'emergenza, viene accettato e confermato dall'initiator. successivamente scade il timeout e viene invocato questo metodo)
+                toWithdraw.add(entry.getKey()); // aggiunge il veicolo alla lista
+            }
+        }
+        if (toWithdraw.isEmpty()) { // se la lista è vuota (non esistono veicoli appartenenti di quel contractor, oppure non esistono veicoli di quella categoria, oppure esiste già un ack per il veicolo)
+            return 0;
+        }
+        for (VehicleId vehicleId : toWithdraw) {
+            removeBorrowedVehicle(vehicleId, emergencyId); // rimuove il veicolo da quelli presi in prestito
+            emergency.removeAssignedVehicle(vehicleId); // rimuove il veicolo da quelli assegnati all'emergenza
+        }
+        saveEmergency(emergency); // salva il nuovo stato dell'emergenza
+        return toWithdraw.size(); // restituisce il numero di veicoli ritirati
+    }
+
     // registra un'emergenza aperta
     public void addEmergency(Emergency emergency) {
         emergencies.put(emergency.getId(), emergency);
@@ -113,11 +165,13 @@ public class ZoneState {
 
     // salva lo stato di un'emergenza nel db
     public void saveEmergency(Emergency emergency) {
-        database.inTransaction(conn -> writeEmergency(conn, emergency));
-        removeIfClosed(emergency); // solo dopo il commit: se la transazione fallisce, la memoria non viene toccata
+        if (emergency != null) {
+            database.inTransaction(conn -> writeEmergency(conn, emergency));
+            removeIfClosed(emergency); // solo dopo il commit: se la transazione fallisce, la memoria non viene toccata
+        }
     }
 
-    // scrive l'emergenza sulla connessione di una transazione
+    // aggiorna l'emergenza nel db
     private void writeEmergency(Connection conn, Emergency emergency) throws SQLException {
         if (emergency.getStatus() == EmergencyStatus.CLOSED) {
             emergencyRepository.delete(conn, emergency.getId());
@@ -143,7 +197,7 @@ public class ZoneState {
         return arrivals;
     }
 
-    // elimina (dalla ram) un'emergenza chiusa, con i suoi prestati e veicoli arrivati
+    // elimina (dalla ram) un'emergenza chiusa, con i suoi veicoli presi in prestito e veicoli arrivati
     private void removeIfClosed(Emergency emergency) {
         if (emergency.getStatus() == EmergencyStatus.CLOSED) {
             EmergencyId emergencyId = emergency.getId();
@@ -158,7 +212,7 @@ public class ZoneState {
         for (EmergencySnapshot snapshot : emergencyRepository.loadAll()) {
             Emergency emergency = snapshot.emergency();
             emergencies.put(emergency.getId(), emergency); // registra l'emergenza
-            if (!snapshot.borrowedVehicles().isEmpty()) { // se esistono veicoli prestati per l'emergenza
+            if (!snapshot.borrowedVehicles().isEmpty()) { // se esistono veicoli presi in prestito per l'emergenza
                 borrowedVehicles.put(emergency.getId(), new HashMap<>(snapshot.borrowedVehicles()));
             }
             for (Map.Entry<VehicleCategory, List<VehicleId>> arrival : snapshot.arrivals().entrySet()) {
@@ -554,22 +608,35 @@ public class ZoneState {
 
     // barriera per l'intervento dei veicoli sull'emergenza
 
+    // decide se l'initiator accetta l'arrivo sulla scena di un veicolo prestato
+    public ArrivalOutcome admitArrival(Emergency emergency, VehicleId vehicleId, VehicleCategory category, ZoneId contractorZoneId) {
+        BorrowedVehicleInfo info = borrowedInfo(vehicleId, emergency.getId());
+        if (info != null) { // se il veicolo è tra i prestati dell'emergenza
+            if (info.deadlineMillis() != null) { // se la scadenza era già stata fissata (possibile quando l'invio della deadline verso il contractor si perde, e il contractor notifica di nuovo l'arrivo)
+                return ArrivalOutcome.ALREADY_COMPLETED;
+            }
+            // altrimenti
+            updateBorrowed(emergency.getId(), vehicleId, BorrowedVehicleInfo::withConfirmationAcked); // aggiorna l'informazione del veicolo con l'ack della conferma del veicolo (magari prima si era persa ed è arrivata solo in questo momento)
+            return ArrivalOutcome.ADMITTED;
+        }
+        if (missingCount(emergency, category) > 0) { // se il veicolo non è tra i prestati (non atteso) ma mancano ancora veicoli di quella categoria
+            addBorrowedVehicle(vehicleId, emergency.getId(), category, contractorZoneId); // aggiunge il veicolo tra quelli presi in prestito
+            updateBorrowed(emergency.getId(), vehicleId, BorrowedVehicleInfo::withConfirmationAcked); // aggiorna l'informazione del veicolo con l'ack della conferma del veicolo da parte del contractor
+            emergency.addAssignedVehicle(vehicleId); // aggiunge il veicolo tra quelli assegnati all'emergenza
+            return ArrivalOutcome.ADMITTED;
+        }
+        // altrimenti
+        return ArrivalOutcome.REJECTED;
+    }
+
     // registra l'arrivo di un veicolo su un'emergenza
     public List<VehicleId> registerArrivalOnScene(EmergencyId emergencyId, VehicleCategory category, VehicleId vehicleId) {
         List<VehicleId> arrived = vehiclesOnScene.computeIfAbsent(new PendingReservationKey(emergencyId, category), k -> new ArrayList<>());
         if (!arrived.contains(vehicleId)) { // evita di contare due volte un arrivo duplicato, rimandato dopo un crash del contractor
             arrived.add(vehicleId);
-            saveEmergencyById(emergencyId); // salva l'emergenza con l'info dei veicoli arrivati
+            saveEmergency(emergencies.get(emergencyId)); // salva l'emergenza con l'info dei veicoli arrivati
         }
         return arrived;
-    }
-
-    // salva l'emergenza con quell'id, se esiste
-    private void saveEmergencyById(EmergencyId emergencyId) {
-        Emergency emergency = emergencies.get(emergencyId);
-        if (emergency != null) {
-            saveEmergency(emergency);
-        }
     }
 
     // verifica se tutti i veicoli richiesti di una categoria sono arrivati sull'emergenza
@@ -577,9 +644,22 @@ public class ZoneState {
         return arrived.size() >= requiredQuantityFor(emergency, category);
     }
 
-    public void clearOnSceneGroup(EmergencyId emergencyId, VehicleCategory category) {
-        if (vehiclesOnScene.remove(new PendingReservationKey(emergencyId, category)) != null) {
-            saveEmergencyById(emergencyId); // salva l'emergenza con l'info del gruppo di veicoli che hanno completato l'intervento
+    // tutti i veicoli della categoria sono arrivati: salva in un'unica transazione la scadenza dei veicoli locali, la scadenza dei veicoli prestati e la fine del gruppo di arrivi (se si salvassero separatamente, un crash nel mezzo lascerebbe il gruppo a metà)
+    public void saveOnSceneGroupCompletion(Emergency emergency, VehicleCategory category, List<VehicleId> arrived, long deadlineMillis, Function<VehicleId, Long> onSceneStartedAtOf) {
+        for (VehicleId vehicleId : arrived) { // per ogni veicolo arrivato sull'emergenza
+            if (!vehicles.containsKey(vehicleId)) { // se è un veicolo prestato
+                updateBorrowed(emergency.getId(), vehicleId, info -> info.withDeadline(deadlineMillis)); // aggiorna l'informazione del veicolo con la deadline
+            }
         }
+        vehiclesOnScene.remove(new PendingReservationKey(emergency.getId(), category)); // elimina il gruppo di veicoli di quella categoria dalla lista dei veicoli sulla scena
+        database.inTransaction(conn -> { // salva tutto in un'unica transizione
+            for (VehicleId vehicleId : arrived) { // per ogni veicolo arrivato sull'emergenza
+                Vehicle vehicle = vehicles.get(vehicleId);
+                if (vehicle != null) {
+                    vehicleRepository.save(conn, vehicleId, VehicleStatus.ON_SCENE, vehicle.getPosition(), null, vehicle.getBatteryLevel(), null, onSceneStartedAtOf.apply(vehicleId), deadlineMillis);
+                }
+            }
+            writeEmergency(conn, emergency); // aggiorna le informazioni dell'emergenza nel db
+        });
     }
 }

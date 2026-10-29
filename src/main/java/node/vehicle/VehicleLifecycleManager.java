@@ -91,9 +91,7 @@ public class VehicleLifecycleManager {
             onSceneStartedAt.put(vehicle.getId(), arrivalTime); // registra il tempo di arrivo del veicolo sull'emergenza
             vehicle.setStatus(VehicleStatus.ON_SCENE);
             if (loan.isPresent()) { // se il veicolo è stato prestato
-                ActiveLoan activeLoan = loan.get();
-                ArrivedOnScene arrivalMessage = new ArrivedOnScene(activeLoan.emergencyId(), vehicle.getId(), activeLoan.category(), zoneState.getZoneId());
-                nodeClient.notifyArrival(activeLoan.requesterZoneId(), arrivalMessage, () -> scheduleBorrowedCompletion(vehicle.getId(), System.currentTimeMillis())); // notifica l'initiator che il veicolo prestato è arrivato sull'emergenza; se l'initiator rifiuta l'arrivo (il veicolo non serve), l'intervento termina subito e il veicolo torna alla base
+                notifyBorrowedArrival(vehicle, loan.get());
             } else { // se il veicolo è locale
                 Emergency emergency = zoneState.findAssignedEmergency(vehicle.getId()).orElseThrow(() -> new IllegalStateException("No emergency found for local vehicle on scene: " + vehicle.getId().value()));
                 handleOnSceneArrival(emergency, vehicle.getCategory(), vehicle.getId(), arrivalTime);
@@ -102,6 +100,11 @@ public class VehicleLifecycleManager {
             vehicle.setDestination(null);
             vehicleRepository.delete(vehicle.getId());
         }
+    }
+
+    private void notifyBorrowedArrival(Vehicle vehicle, ActiveLoan loan) {
+        ArrivedOnScene arrivalMessage = new ArrivedOnScene(loan.emergencyId(), vehicle.getId(), loan.category(), zoneState.getZoneId());
+        nodeClient.notifyArrival(loan.requesterZoneId(), arrivalMessage, () -> scheduleBorrowedCompletion(vehicle.getId(), System.currentTimeMillis())); // notifica l'initiator che il veicolo prestato è arrivato sull'emergenza; se l'initiator rifiuta l'arrivo (il veicolo non serve), l'intervento termina subito e il veicolo torna alla base
     }
 
     // salva periodicamente le informazioni dei veicoli nel db, così da ricostruirli in caso di crash
@@ -166,7 +169,7 @@ public class VehicleLifecycleManager {
     // ricostruisce l'intervento del veicolo sull'emergenza
     private long catchUpOnScene(Vehicle vehicle, long elapsedMs) {
         Long deadline = onSceneDeadline.get(vehicle.getId()); // recupera il tempo di fine intervento del veicolo
-        if (deadline != null) { // tempo di fine intervento già conosciuto al momento del crash (erano arrivati tutti i veicoli della categoria sull'emergenza)
+        if (deadline != null) { // se il tempo di fine intervento era già conosciuto al momento del crash (erano arrivati tutti i veicoli della categoria sull'emergenza)
             long start = onSceneStartedAt.get(vehicle.getId()); // recupera il tempo di inizio intervento
             long durationNeeded = deadline - start; // recupera i ms necessari al completamento dell'intervento
             if (elapsedMs >= durationNeeded) { // l'intervento si è concluso durante il crash
@@ -177,9 +180,10 @@ public class VehicleLifecycleManager {
             vertx.setTimer(remainingOnSceneMs, id -> onInterventionComplete(vehicle)); // attende questi ms e poi gestisce il completamento (n.b.: qui il comportamento non è bloccante, quindi si prosegue con l'esecuzione)
             return 0; // restituisce 0 per far terminare il ciclo while
         }
-        // tempo di fine intervento non conosciuto al momento del crash (non erano arrivati tutti i veicoli della categoria sull'emergenza)
-        // LIMITE NOTO (rimandato al Gap 6): la lista degli arrivi (vehiclesOnScene) non è persistita
-        if (zoneState.hasActiveLoan(vehicle.getId())) { // se il veicolo è stato dato in prestito
+        // altrimenti, se il tempo di fine intervento non era conosciuto al momento del crash (non erano arrivati tutti i veicoli della categoria sull'emergenza)
+        Optional<ActiveLoan> loan = zoneState.getActiveLoan(vehicle.getId());
+        if (loan.isPresent()) { // se il veicolo è stato dato in prestito
+            notifyBorrowedArrival(vehicle, loan.get()); // notifica l'initiator dell'arrivo (potrebbe già stato essere inviato, ma l'initiator ignora i duplicati)
             return 0;
         }
         // se il veicolo è locale
@@ -198,23 +202,22 @@ public class VehicleLifecycleManager {
         }
     }
 
-    // il gruppo è completo: fissa la scadenza condivisa, avvia il timer per i locali, notifica SceneDeadline ai contractor dei prestati
+    // il gruppo è completo: fissa la scadenza condivisa, avvia il timer per i locali, notifica la deadline ai contractor dei veicoli presi in prestito
     private void completeOnSceneGroup(Emergency emergency, VehicleCategory category, List<VehicleId> arrived, long completingArrivalTime) {
         long deadlineMillis = completingArrivalTime + ON_SCENE_DURATION_MS; // orario di completamento dell'intervento
+        zoneState.saveOnSceneGroupCompletion(emergency, category, arrived, deadlineMillis, onSceneStartedAt::get); // salva nel db, in un'unica transazione, la scadenza dei veicoli locali e dei veicoli prestati e la fine del gruppo di arrivi sull'emergenza
         for (VehicleId vehicleId : arrived) { // per ogni veicolo arrivato sull'emergenza
             if (zoneState.hasVehicle(vehicleId)) { // se il veicolo è locale
                 onSceneDeadline.put(vehicleId, deadlineMillis); // registra il tempo di fine intervento del veicolo
                 Vehicle groupVehicle = zoneState.getVehicle(vehicleId);
-                vehicleRepository.save(vehicleId, VehicleStatus.ON_SCENE, groupVehicle.getPosition(), null, groupVehicle.getBatteryLevel(), null, onSceneStartedAt.get(vehicleId), deadlineMillis); // salva le info del veicolo
                 long delay = Math.max(1, deadlineMillis - System.currentTimeMillis()); // converte l'orario di completamento dell'intervento in una durata (in ms - la funzione è necessaria perchè deadlineMillis è un orario precedente, quindi la sottrazione può dare risultato negativo)
                 vertx.setTimer(delay, id -> onInterventionComplete(groupVehicle)); // imposta il timer dopo il quale il veicolo completa l'emergenza
             } else { // se il veicolo è stato prestato
                 ZoneId contractorZoneId = zoneState.getBorrowedVehicleContractorZone(vehicleId, emergency.getId()).orElseThrow(() -> new IllegalStateException("No contractor zone found for borrowed vehicle: " + vehicleId.value()));
                 OnSceneDeadline deadlineMessage = new OnSceneDeadline(emergency.getId(), vehicleId, deadlineMillis);
-                nodeClient.notifyDeadline(contractorZoneId, deadlineMessage, () -> { }); // notifica al contractor il tempo di completamento dell'intervento del veicolo prestato
+                nodeClient.notifyDeadline(contractorZoneId, deadlineMessage, () -> zoneState.markDeadlineAcked(emergency.getId(), vehicleId)); // notifica al contractor il tempo di completamento dell'intervento del veicolo prestato; quando il contractor lo riceve salva l'ack nel db
             }
         }
-        zoneState.clearOnSceneGroup(emergency.getId(), category);
     }
 
     // contractor
@@ -222,10 +225,12 @@ public class VehicleLifecycleManager {
     // riceve dall'initiator il tempo di completamento dell'intervento del veicolo
     public void scheduleBorrowedCompletion(VehicleId vehicleId, long deadlineMillis) {
         Vehicle vehicle = zoneState.getVehicle(vehicleId);
-        onSceneDeadline.put(vehicleId, deadlineMillis); // registra il tempo di fine intervento del veicolo
-        vehicleRepository.save(vehicleId, VehicleStatus.ON_SCENE, vehicle.getPosition(), null, vehicle.getBatteryLevel(), zoneState.getActiveLoan(vehicleId).orElse(null), onSceneStartedAt.get(vehicleId), deadlineMillis); // salva le info del veicolo
-        long delay = Math.max(1, deadlineMillis - System.currentTimeMillis()); // converte l'orario di completamento dell'intervento in una durata (in ms - la funzione è necessaria perchè deadlineMillis è un orario precedente, quindi la sottrazione può dare risultato negativo)
-        vertx.setTimer(delay, id -> onInterventionComplete(vehicle)); // imposta il timer dopo il quale il veicolo completa l'emergenza
+        if (vehicle.getStatus() == VehicleStatus.ON_SCENE && !onSceneDeadline.containsKey(vehicleId)) { // se il veicolo è sulla scena e la scadenza non è stata già fissata
+            onSceneDeadline.put(vehicleId, deadlineMillis); // registra il tempo di fine intervento del veicolo
+            vehicleRepository.save(vehicleId, VehicleStatus.ON_SCENE, vehicle.getPosition(), null, vehicle.getBatteryLevel(), zoneState.getActiveLoan(vehicleId).orElse(null), onSceneStartedAt.get(vehicleId), deadlineMillis); // salva le info del veicolo
+            long delay = Math.max(1, deadlineMillis - System.currentTimeMillis()); // converte l'orario di completamento dell'intervento in una durata (in ms - la funzione è necessaria perchè deadlineMillis è un orario precedente, quindi la sottrazione può dare risultato negativo)
+            vertx.setTimer(delay, id -> onInterventionComplete(vehicle)); // imposta il timer dopo il quale il veicolo completa l'emergenza
+        }
     }
 
     // gestisce la fine dell'intervento sull'emergenza

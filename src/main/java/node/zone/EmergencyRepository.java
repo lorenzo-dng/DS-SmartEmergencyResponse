@@ -172,10 +172,14 @@ public class EmergencyRepository {
     private static String borrowedToJson(Map<VehicleId, BorrowedVehicleInfo> borrowedVehicles) {
         JsonArray array = new JsonArray();
         for (Map.Entry<VehicleId, BorrowedVehicleInfo> entry : borrowedVehicles.entrySet()) {
+            BorrowedVehicleInfo info = entry.getValue();
             array.add(new JsonObject()
                     .put("vehicleId", entry.getKey().value())
-                    .put("category", entry.getValue().category().name())
-                    .put("contractorZoneId", entry.getValue().contractorZoneId().value()));
+                    .put("category", info.category().name())
+                    .put("contractorZoneId", info.contractorZoneId().value())
+                    .put("confirmationAcked", info.confirmationAcked())
+                    .put("deadlineMillis", info.deadlineMillis())
+                    .put("deadlineAcked", info.deadlineAcked()));
         }
         return array.encode();
     }
@@ -215,7 +219,12 @@ public class EmergencyRepository {
         Map<VehicleId, BorrowedVehicleInfo> borrowedVehicles = new HashMap<>();
         for (int i = 0; i < array.size(); i++) {
             JsonObject object = array.getJsonObject(i);
-            borrowedVehicles.put(new VehicleId(object.getString("vehicleId")), new BorrowedVehicleInfo(VehicleCategory.valueOf(object.getString("category")), new ZoneId(object.getString("contractorZoneId"))));
+            borrowedVehicles.put(new VehicleId(object.getString("vehicleId")), new BorrowedVehicleInfo(
+                    VehicleCategory.valueOf(object.getString("category")),
+                    new ZoneId(object.getString("contractorZoneId")),
+                    object.getBoolean("confirmationAcked", false),
+                    object.getLong("deadlineMillis"), // null se la scadenza non è ancora stata fissata
+                    object.getBoolean("deadlineAcked", false)));
         }
         return borrowedVehicles;
     }
