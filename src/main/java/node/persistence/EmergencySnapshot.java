@@ -1,4 +1,4 @@
-package node.zone;
+package node.persistence;
 
 import domain.emergency.Emergency;
 import domain.vehicle.VehicleCategory;

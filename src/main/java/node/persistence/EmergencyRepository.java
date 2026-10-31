@@ -1,4 +1,4 @@
-package node.zone;
+package node.persistence;
 
 import domain.common.Position;
 import domain.emergency.Emergency;

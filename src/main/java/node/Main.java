@@ -10,6 +10,7 @@ import domain.zone.Zone;
 import domain.zone.ZoneId;
 import io.vertx.core.Vertx;
 import node.config.NodeConfig;
+import node.persistence.*;
 import node.server.NodeServer;
 import node.topology.ZoneGridFactory;
 import node.vehicle.VehicleLifecycleManager;

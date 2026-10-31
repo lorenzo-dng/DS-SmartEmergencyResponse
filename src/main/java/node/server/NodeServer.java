@@ -18,9 +18,9 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import node.vehicle.VehicleLifecycleManager;
-import node.zone.ActiveLoan;
+import node.persistence.ActiveLoan;
 import node.zone.ArrivalOutcome;
-import node.zone.VehicleRepository;
+import node.persistence.VehicleRepository;
 import node.zone.ZoneState;
 
 import java.util.ArrayList;
@@ -82,7 +82,7 @@ public class NodeServer extends VerticleBase {
                 .thenComparingInt(v -> v.getId().value().hashCode())).toList(); // tie-breaker finale in caso di parità totale
         List<Vehicle> selected = feasible.stream().limit(cfp.requiredCount()).toList(); // dalla lista ordinata, prende i veicoli nel numero richiesto
         if (selected.isEmpty()) { // se non è stato trovato nessun veicolo
-            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
+            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
             return;
         }
         List<VehicleOffer> offers = new ArrayList<>();
@@ -133,11 +133,11 @@ public class NodeServer extends VerticleBase {
                     vehicle.setStatus(VehicleStatus.AVAILABLE);
                 }
             }
-            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
+            ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
         } else { // altrimenti, se la prenotazione non esiste più (la conferma era già stata elaborata - l'initiator la rinvia se non ha ricevuto la risposta - oppure è scaduto il timer)
             boolean alreadyActivated = resolution.confirmedVehicleIds().stream().allMatch(vehicleId -> zoneState.getActiveLoan(vehicleId).map(loan -> loan.emergencyId().equals(resolution.emergencyId())).orElse(false)); // restituisce vero se tutti i veicoli confermati sono già stati attivati per l'emergenza oppure se non è stato confermato nessun veicolo
             if (alreadyActivated) { // se tutti i veicoli confermati già sono stati attivati o non è stato confermato nessun veicolo
-                ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack) che indica che la richiesta è stata elaborata con successo ma non c'è nessun contenuto da restituire (il contractor non risponde)
+                ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
             } else { // altrimenti, è scaduto i timer e i veicoli sono stati rilasciati
                 System.out.println("ContractResolution arrived too late for emergency " + resolution.emergencyId().value() + " (" + resolution.category() + "): reservation already timed out");
                 ctx.response().setStatusCode(410).end(); // invia una risposta negativa: la prenotazione non esiste più
@@ -157,10 +157,10 @@ public class NodeServer extends VerticleBase {
             ArrivalOutcome outcome = zoneState.admitArrival(emergency.get(), notification.vehicleId(), notification.category(), notification.contractorZoneId()); // verifica se accettare o meno l'arrivo del veicolo
             switch (outcome) {
                 case ADMITTED -> {
-                    lifecycleManager.handleOnSceneArrival(emergency.get(), notification.category(), notification.vehicleId(), System.currentTimeMillis());
-                    ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
+                    lifecycleManager.handleArrivalOnScene(emergency.get(), notification.category(), notification.vehicleId(), System.currentTimeMillis());
+                    ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
                 }
-                case ALREADY_COMPLETED -> ctx.response().setStatusCode(200).end(); // notifica duplicata (il contractor non ha ricevuto ancora l'ack)
+                case ALREADY_REGISTERED -> ctx.response().setStatusCode(204).end(); // notifica duplicata (il contractor non ha ricevuto ancora l'ack)
                 case REJECTED -> ctx.response().setStatusCode(409).end(); // invia una risposta negativa (il contractor libera il veicolo)
             }
         }
@@ -172,7 +172,7 @@ public class NodeServer extends VerticleBase {
     private void handleOnSceneDeadline(RoutingContext ctx) {
         OnSceneDeadline notification = OnSceneDeadline.fromJson(ctx.body().asJsonObject());
         lifecycleManager.scheduleBorrowedCompletion(notification.vehicleId(), notification.deadlineMillis());
-        ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
+        ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
     }
 
     // initiator
@@ -186,6 +186,6 @@ public class NodeServer extends VerticleBase {
             zoneState.removeBorrowedVehicle(notification.vehicleId(), notification.emergencyId());
             zoneState.saveEmergency(emergency.get()); // salva lo stato aggiornato dell'emergenza nel db
         }
-        ctx.response().setStatusCode(200).end(); // invia una risposta positiva (ack)
+        ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
     }
 }

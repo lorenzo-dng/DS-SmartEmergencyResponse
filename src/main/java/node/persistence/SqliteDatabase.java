@@ -1,4 +1,4 @@
-package node.zone;
+package node.persistence;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
