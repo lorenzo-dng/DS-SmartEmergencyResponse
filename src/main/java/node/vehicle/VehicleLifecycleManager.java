@@ -6,6 +6,7 @@ import communication.handoff.NodeClient;
 import communication.handoff.OnSceneDeadline;
 import domain.common.Position;
 import domain.emergency.Emergency;
+import domain.emergency.EmergencyId;
 import domain.utils.GeoUtils;
 import domain.vehicle.Vehicle;
 import domain.vehicle.VehicleCategory;
@@ -13,8 +14,7 @@ import domain.vehicle.VehicleId;
 import domain.vehicle.VehicleStatus;
 import domain.zone.ZoneId;
 import io.vertx.core.Vertx;
-import node.persistence.ActiveLoan;
-import node.persistence.VehicleRepository;
+import node.persistence.*;
 import node.zone.*;
 
 import java.util.HashMap;
@@ -34,7 +34,8 @@ public class VehicleLifecycleManager {
     private final VehicleRepository vehicleRepository;
     private final NodeClient nodeClient;
     private final Map<VehicleId, Long> onSceneStartedAtByVehicle; // tiene traccia dell'orario di inizio intervento sull'emergenza, per ricostruire correttamente il tempo residuo dopo un crash
-    private final Map<VehicleId, Long> onSceneDeadlineByVehicle; // tiene traccia del tempo di fine intervento di un veicolo (coincide con il tempo di fine intervento di tutti i veicoli della stessa cateogria)
+    private final Map<VehicleId, Long> onSceneDeadlineByVehicle; // tiene traccia del tempo di fine intervento di un veicolo (coincide con il tempo di fine intervento di tutti i veicoli della stessa categoria)
+    private final Map<VehicleId, Long> recoveryStartTimeByVehicle; // dopo un crash, per ogni veicolo ripristinato, l'orario da cui ricostruire quanto è accaduto (utilizzato da recoverAfterCrash)
 
     public VehicleLifecycleManager(ZoneState zoneState, Vertx vertx, VehicleRepository vehicleRepository, NodeClient nodeClient) {
         this.zoneState = zoneState;
@@ -43,6 +44,7 @@ public class VehicleLifecycleManager {
         this.nodeClient = nodeClient;
         this.onSceneStartedAtByVehicle = new HashMap<>();
         this.onSceneDeadlineByVehicle = new HashMap<>();
+        this.recoveryStartTimeByVehicle = new HashMap<>();
     }
 
     // comune
@@ -52,37 +54,28 @@ public class VehicleLifecycleManager {
         vertx.setPeriodic(POSITION_UPDATE_INTERVAL_MS, id -> advanceAllVehicles());
     }
 
-    // verifica se un veicolo è in viaggio (verso l'evento o verso la base)
-    private boolean isTravelling(Vehicle vehicle) {
-        return vehicle.getStatus() == VehicleStatus.EN_ROUTE || (vehicle.getStatus() == VehicleStatus.AVAILABLE && vehicle.getDestination() != null);
-    }
-
-    // verifica se un veicolo è alla base
-    private boolean isAtBase(Vehicle vehicle) {
-        return vehicle.getStatus() == VehicleStatus.AVAILABLE && vehicle.getDestination() == null;
-    }
-
+    // avanza la posizione dei veicoli verso la destinazione (emergenza o base)
     private void advanceAllVehicles() {
-        for (Vehicle vehicle : zoneState.getVehicles()) {
+        for (Vehicle vehicle : zoneState.getVehicles()) { // per ogni veicolo
             if (isTravelling(vehicle)) {
-                advance(vehicle);
+                double remainingKm = GeoUtils.haversine(vehicle.getPosition(), vehicle.getDestination());
+                double stepKm = GeoUtils.averageSpeedKmh(vehicle.getCategory()) * (POSITION_UPDATE_INTERVAL_MS / MILLIS_PER_HOUR); // distanza percorsa a ogni aggiornamento
+                if (remainingKm <= stepKm) { // il prossimo step supererebbe la destinazione: arrivato
+                    vehicle.setPosition(vehicle.getDestination());
+                    onArrival(vehicle, System.currentTimeMillis()); // il veicolo è arrivato all'emergenza
+                } else {
+                    double fraction = stepKm / remainingKm; // converta i km nella copertura del segmento che separa il veicolo alla destinazione ("quanto segmento deve coprire con x stepKm?")
+                    double newLat = vehicle.getPosition().latitude() + fraction * (vehicle.getDestination().latitude() - vehicle.getPosition().latitude());
+                    double newLon = vehicle.getPosition().longitude() + fraction * (vehicle.getDestination().longitude() - vehicle.getPosition().longitude());
+                    vehicle.setPosition(new Position(newLat, newLon));
+                }
             }
         }
     }
 
-    // avanza la posizione del veicolo verso la destinazione (emergenza o base)
-    private void advance(Vehicle vehicle) {
-        double remainingKm = GeoUtils.haversine(vehicle.getPosition(), vehicle.getDestination());
-        double stepKm = GeoUtils.averageSpeedKmh(vehicle.getCategory()) * (POSITION_UPDATE_INTERVAL_MS / MILLIS_PER_HOUR); // distanza percorsa a ogni aggiornamento
-        if (remainingKm <= stepKm) { // il prossimo step supererebbe la destinazione: arrivato
-            vehicle.setPosition(vehicle.getDestination());
-            onArrival(vehicle, System.currentTimeMillis()); // il veicolo è arrivato all'emergenza
-        } else {
-            double fraction = stepKm / remainingKm; // converta i km nella copertura del segmento che separa il veicolo alla destinazione ("quanto segmento deve coprire con x stepKm?")
-            double newLat = vehicle.getPosition().latitude() + fraction * (vehicle.getDestination().latitude() - vehicle.getPosition().latitude());
-            double newLon = vehicle.getPosition().longitude() + fraction * (vehicle.getDestination().longitude() - vehicle.getPosition().longitude());
-            vehicle.setPosition(new Position(newLat, newLon));
-        }
+    // verifica se un veicolo è in viaggio (verso l'evento o verso la base)
+    private boolean isTravelling(Vehicle vehicle) {
+        return vehicle.getStatus() == VehicleStatus.EN_ROUTE || (vehicle.getStatus() == VehicleStatus.AVAILABLE && vehicle.getDestination() != null);
     }
 
     // gestisce l'arrivo del veicolo all'emergenza o alla base
@@ -125,18 +118,77 @@ public class VehicleLifecycleManager {
         }
     }
 
-    // ripopola l'orario di inizio intervento letto dal checkpoint
-    public void registerOnSceneStart(VehicleId vehicleId, long sceneStartedAtMillis) {
-        onSceneStartedAtByVehicle.put(vehicleId, sceneStartedAtMillis);
+    // verifica se un veicolo è alla base
+    private boolean isAtBase(Vehicle vehicle) {
+        return vehicle.getStatus() == VehicleStatus.AVAILABLE && vehicle.getDestination() == null;
     }
 
-    // ripopola l'orario di fine intervento effettivo letto dal checkpoint
-    public void registerOnSceneDeadline(VehicleId vehicleId, long sceneDeadlineMillis) {
-        onSceneDeadlineByVehicle.put(vehicleId, sceneDeadlineMillis);
+    // recovery dopo un crash
+
+    // ripristina lo stato dei veicoli (ma non quanto accaduto durante il crash)
+    public void restoreVehicles(List<VehicleCheckpoint> checkpoints) {
+        for (VehicleCheckpoint checkpoint : checkpoints) { // per ogni veicolo non AVAILABLE al momento del crash
+            Vehicle vehicle = zoneState.getVehicle(checkpoint.vehicleId());
+            vehicle.setStatus(checkpoint.status());
+            vehicle.setPosition(checkpoint.currentPosition());
+            vehicle.setDestination(checkpoint.destination());
+            vehicle.setBatteryLevel(checkpoint.batteryLevel());
+            if (checkpoint.emergencyId() != null) { // se era un prestito attivo, lo riaggiunge ai prestiti attivi
+                zoneState.addActiveLoan(checkpoint.vehicleId(), checkpoint.emergencyId(), checkpoint.requesterZoneId(), vehicle.getCategory());
+            }
+            long referenceTime = checkpoint.checkpointAtMillis(); // prende l'orario dell'ultimo salvataggio del checkpoint
+            if (checkpoint.status() == VehicleStatus.ON_SCENE && checkpoint.onSceneStartedAtMillis() != null) { // se il veicolo era sull'emergenza e quindi stava iniziando l'intervento
+                /*
+                ripopola le mappe con l'orario di inizio e di fine intervento letti dal checkpoint:
+                1. il funzionamento del nodo legge i valori dalle mappe
+                2. il checkpoint periodico riscrive la riga del veicolo prendendo i valori dalle mappe: se fossero vuote, verrebbero sostituiti con null
+                */
+                onSceneStartedAtByVehicle.put(checkpoint.vehicleId(), checkpoint.onSceneStartedAtMillis());
+                if (checkpoint.onSceneDeadlineMillis() != null) {
+                    onSceneDeadlineByVehicle.put(checkpoint.vehicleId(), checkpoint.onSceneDeadlineMillis());
+                }
+                referenceTime = checkpoint.onSceneStartedAtMillis(); // prende il tempo dall'inizio reale dell'intervento sull'emergenza
+            }
+            recoveryStartTimeByVehicle.put(checkpoint.vehicleId(), referenceTime); // da questo orario verrà ricostruito quanto è accaduto durante il crash
+        }
     }
 
-    // ricostruisce dopo un crash il percorso del veicolo per il tempo trascorso
-    public void recoverVehicle(Vehicle vehicle, long elapsedMs) {
+    // ricostruisce il comportamento dei veicoli durante il crash
+    public void recoverAfterCrash() {
+        resendUnacknowledgedDeadlines(); // notifica al contractor la deadline dell'intervento dei veicoli per cui non è stato ricevuto l'ack
+        resendPendingCompletions(); // notifica all'initiator il completamento dei veicoli durante il crash per cui non è stato ricevuto l'ack
+        long now = System.currentTimeMillis(); // orario attuale
+        for (Map.Entry<VehicleId, Long> entry : recoveryStartTimeByVehicle.entrySet()) { // per ogni veicolo ripristinato
+            long elapsedMs = now - entry.getValue(); // tempo trascorso durante il crash
+            recoverVehicle(zoneState.getVehicle(entry.getKey()), elapsedMs); // ricostruisce il comportamento del veicolo durante il crash
+        }
+    }
+
+    // initiator -> contractor: rinvia la deadline dell'intervento dei veicoli presi in prestito per cui non è stato ricevuto l'ack
+    private void resendUnacknowledgedDeadlines() {
+        for (Map.Entry<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> emergencyEntry : zoneState.getBorrowedVehicles().entrySet()) { // per ogni emergenza con veicoli presi in prestito
+            for (Map.Entry<VehicleId, BorrowedVehicleInfo> entry : emergencyEntry.getValue().entrySet()) { // per ogni veicolo preso in prestito
+                BorrowedVehicleInfo info = entry.getValue();
+                if (info.deadlineMillis() != null && !info.deadlineAcked()) { // se la scadenza era stata fissata ma non è stato ricevuto l'ack
+                    EmergencyId emergencyId = emergencyEntry.getKey();
+                    VehicleId vehicleId = entry.getKey();
+                    OnSceneDeadline deadlineMessage = new OnSceneDeadline(emergencyId, vehicleId, info.deadlineMillis());
+                    nodeClient.notifyDeadline(info.contractorZoneId(), deadlineMessage, () -> zoneState.markDeadlineAcked(emergencyId, vehicleId)); // invia la notifica e registra l'ack se l'ack viene ricevuto
+                }
+            }
+        }
+    }
+
+    // contractor -> initiator: rinvia il completamento dell'intervento dei veicoli prestati per cui non è stato ricevuto l'ack
+    private void resendPendingCompletions() {
+        for (PendingLoan loan : zoneState.loadPendingLoans()) {
+            InterventionCompleted completionMessage = new InterventionCompleted(loan.emergencyId(), loan.vehicleId(), loan.category());
+            nodeClient.notifyCompletion(loan.requesterZoneId(), completionMessage, () -> zoneState.deletePendingLoan(loan.vehicleId(), loan.emergencyId())); // invia la notifica e cancella il prestito se l'ack viene ricevuto
+        }
+    }
+
+    // ricostruisce il percorso del veicolo per il tempo trascorso durante il crash
+    private void recoverVehicle(Vehicle vehicle, long elapsedMs) {
         long now = System.currentTimeMillis();
         long remainingMs = elapsedMs; // tempo trascorso durante il crash dall'inizio dell'intervento
         while (remainingMs > 0 && !isAtBase(vehicle)) { // finché ci sono ms da recuperare a causa del crash e il veicolo non è tornato alla base

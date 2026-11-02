@@ -2,11 +2,14 @@ package node.zone;
 
 import communication.contractnet.*;
 import domain.emergency.Emergency;
+import domain.emergency.EmergencyId;
 import domain.emergency.Severity;
 import domain.vehicle.VehicleCategory;
 import domain.vehicle.VehicleId;
 import domain.zone.ZoneId;
 import io.vertx.core.Future;
+import node.persistence.BorrowedVehicleInfo;
+
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -87,19 +90,38 @@ public class EmergencyDispatcher {
                     .map(VehicleOffer::vehicleId) // estrae solo l'id del veicolo
                     .filter(selectedIds::contains) // filtra la lista di id mantenendo solo quelli presenti nella lista
                     .collect(Collectors.toList()); // mette tutto in una nuova lista
-            // invia l'esito conclusivo ai contractor
-            ContractResolution resolution = new ContractResolution(emergency.getId(), category, zoneState.getZoneId(), confirmed);
-            ZoneId contractorZoneId = submission.contractorZoneId();
-            sendFutures.add(contractNetClient.sendResolution(resolution, contractorZoneId)
-                    .onSuccess(v -> zoneState.markConfirmationAcked(emergency.getId(), confirmed)) // il contractor ha attivato i veicoli: salva l'ack nel db
-                    .onFailure(err -> { // il contractor non ha confermato (irraggiungibile, timeout o prenotazione non più valida): l'initiator ritira i veicoli di quel contractor
-                        int withdrawn = zoneState.withdrawUnconfirmedVehicles(emergency.getId(), contractorZoneId, category);
-                        if (withdrawn > 0) { // se ci sono veicoli ritirati
-                            System.out.println("Resolution not confirmed by zone " + contractorZoneId.value() + " for emergency " + emergency.getId().value() + " (" + category + "): withdrawn " + withdrawn + " vehicle(s)");
-                        }
-                    })
-                    .recover(err -> Future.succeededFuture())); // trasforma una future fallita (caso .onFailure) in una riuscita, cosi che Future.join finale possa essere eseguito con successo
+            sendFutures.add(sendResolution(emergency.getId(), category, submission.contractorZoneId(), confirmed)); // invia l'esito conclusivo ai contractor
         }
         return Future.join(sendFutures).mapEmpty(); // attende che tutte le risoluzioni siano state inviate, per poi restituire il risultato
+    }
+
+    // invia a un contractor l'esito conclusivo della negoziazione: se il contractor lo conferma salva l'ack nel db, altrimenti l'initiator ritira i veicoli di quel contractor
+    private Future<Void> sendResolution(EmergencyId emergencyId, VehicleCategory category, ZoneId contractorZoneId, List<VehicleId> confirmed) {
+        ContractResolution resolution = new ContractResolution(emergencyId, category, zoneState.getZoneId(), confirmed);
+        return contractNetClient.sendResolution(resolution, contractorZoneId)
+                .onSuccess(v -> zoneState.markConfirmationAcked(emergencyId, confirmed)) // il contractor ha attivato i veicoli: salva l'ack nel db
+                .onFailure(err -> { // il contractor non ha confermato (irraggiungibile, timeout o prenotazione non più valida): l'initiator ritira i veicoli di quel contractor
+                    int withdrawn = zoneState.withdrawUnconfirmedVehicles(emergencyId, contractorZoneId, category);
+                    if (withdrawn > 0) { // se ci sono veicoli ritirati
+                        System.out.println("Resolution not confirmed by zone " + contractorZoneId.value() + " for emergency " + emergencyId.value() + " (" + category + "): withdrawn " + withdrawn + " vehicle(s)");
+                    }
+                })
+                .recover(err -> Future.succeededFuture()); // trasforma una future fallita (caso .onFailure) in una riuscita, cosi che Future.join possa essere eseguito con successo
+    }
+
+    // initiator: al riavvio dopo un crash rinvia la conferma ai contractor per i veicoli presi in prestito di cui non è stata ricevuta la conferma (se la prenotazione è ancora valida il contractor attiva i veicoli, se li ha già attivati conferma senza riattivarli, altrimenti risponde 410 e l'initiator li ritira)
+    public void resendUnconfirmedResolutions() {
+        for (Map.Entry<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> emergencyEntry : zoneState.getBorrowedVehicles().entrySet()) { // per ogni emergenza con veicoli presi in prestito
+            Map<ContractorCategory, List<VehicleId>> unconfirmed = new HashMap<>(); // veicoli senza conferma (raggruppati per contractor e categoria)
+            for (Map.Entry<VehicleId, BorrowedVehicleInfo> entry : emergencyEntry.getValue().entrySet()) { // per ogni veicolo preso in prestito
+                BorrowedVehicleInfo info = entry.getValue();
+                if (!info.confirmationAcked()) { // se il contractor non ha confermato di aver attivato il veicolo
+                    unconfirmed.computeIfAbsent(new ContractorCategory(info.contractorZoneId(), info.category()), k -> new ArrayList<>()).add(entry.getKey()); // aggiunge il evicolo alla mappa
+                }
+            }
+            for (Map.Entry<ContractorCategory, List<VehicleId>> group : unconfirmed.entrySet()) { // per ogni gruppo di veicoli senza conferma
+                sendResolution(emergencyEntry.getKey(), group.getKey().category(), group.getKey().contractorZoneId(), group.getValue()); // invia al contractor l'esito conclusivo della negoziazione
+            }
+        }
     }
 }

@@ -113,7 +113,7 @@ public class VehicleRepository {
     // ricarica tutti i checkpoint al riavvio del nodo dopo il crash
     public List<VehicleCheckpoint> loadAll() {
         List<VehicleCheckpoint> checkpoints = new ArrayList<>();
-        String sql = "SELECT vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, on_scene_started_at, on_sscene_deadline FROM vehicle_checkpoints"; // query sql
+        String sql = "SELECT vehicle_id, status, lat, lon, dest_lat, dest_lon, battery_level, checkpoint_at, emergency_id, requester_zone_id, on_scene_started_at, on_scene_deadline FROM vehicle_checkpoints"; // query sql
         try (Connection conn = database.open();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) { // esegue la query e restituisce i risultati delle colonne (righe)

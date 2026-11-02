@@ -21,6 +21,7 @@ import node.vehicle.VehicleLifecycleManager;
 import node.persistence.ActiveLoan;
 import node.zone.ArrivalOutcome;
 import node.persistence.VehicleRepository;
+import node.zone.EmergencyDispatcher;
 import node.zone.ZoneState;
 
 import java.util.ArrayList;
@@ -36,22 +37,33 @@ public class NodeServer extends VerticleBase {
     private final int reservationTimeoutMs;
     private final VehicleRepository vehicleRepository;
     private final VehicleLifecycleManager lifecycleManager;
+    private final EmergencyDispatcher emergencyDispatcher;
 
-    public NodeServer(int port, ZoneState zoneState, int reservationTimeoutMs, VehicleRepository vehicleRepository, VehicleLifecycleManager lifecycleManager) {
+    public NodeServer(int port, ZoneState zoneState, int reservationTimeoutMs, VehicleRepository vehicleRepository, VehicleLifecycleManager lifecycleManager, EmergencyDispatcher emergencyDispatcher) {
         this.port = port;
         this.zoneState = zoneState;
         this.reservationTimeoutMs = reservationTimeoutMs;
         this.vehicleRepository = vehicleRepository;
         this.lifecycleManager = lifecycleManager;
+        this.emergencyDispatcher = emergencyDispatcher;
+    }
+
+    // avvia il nodo
+    @Override
+    public Future<?> start() {
+        lifecycleManager.recoverAfterCrash(); // ricostruisce il comportamento dei veicoli durante il crash e rinvia ai vicini completamenti e scadenze non confermati
+        emergencyDispatcher.resendUnconfirmedResolutions(); // l'initiator rinvia ai contractor le conferme non ancora ricevute (fase 3)
+        lifecycleManager.start(); // avvia la navigazione dei veicoli in movimento
+        lifecycleManager.startCheckpointing(); // avvia il salvataggio periodico dei checkpoint dei veicoli
+        return startHttpServer(); // avvia il server
     }
 
     // avvia il server http del nodo
-    @Override
-    public Future<?> start() {
+    private Future<?> startHttpServer() {
         Router router = Router.router(vertx); // router che definisce quali richieste il server deve gestire
         router.route().handler(BodyHandler.create()); // necessario per poter leggere il body delle richieste POST
 
-        //rotte
+        // rotte
         router.get("/health").handler(ctx -> ctx.response().putHeader("content-type", "text/plain").end("OK"));
         router.post("/contract-net/call-for-proposal").handler(this::handleCallForProposal);
         router.post("/contract-net/resolution").handler(this::handleContractResolution);
@@ -60,9 +72,7 @@ public class NodeServer extends VerticleBase {
         router.post("/contract-net/intervention-completed").handler(this::handleInterventionCompleted);
 
         // crea e avvia il server http vertx in ascolto sulla porta indicata
-        return vertx.createHttpServer().requestHandler(router).listen(port)
-                .onSuccess(server -> System.out.println("HTTP server listening on port " + port))
-                .onFailure(err -> System.err.println("Failed to start HTTP server: " + err.getMessage()));
+        return vertx.createHttpServer().requestHandler(router).listen(port);
     }
 
     // contractor

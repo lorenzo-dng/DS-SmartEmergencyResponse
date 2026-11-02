@@ -92,6 +92,15 @@ public class ZoneState {
         }
     }
 
+    // restituisce una copia dei veicoli presi in prestito (è necessaria una copia e non una vista immutabile perchè potrebbero sollevarsi eccezioni nel ciclo for di resendUnconfirmedResolutions se l'emergenze viene rimossa)
+    public Map<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> getBorrowedVehicles() {
+        Map<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> vehicles = new HashMap<>();
+        for (Map.Entry<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> entry : borrowedVehicles.entrySet()) {
+            vehicles.put(entry.getKey(), new HashMap<>(entry.getValue()));
+        }
+        return vehicles;
+    }
+
     // restituisce la zona del contractor che ha prestato il veicolo
     public Optional<ZoneId> getBorrowedVehicleContractorZone(VehicleId vehicleId, EmergencyId emergencyId) {
         return Optional.ofNullable(borrowedInfo(vehicleId, emergencyId)).map(BorrowedVehicleInfo::contractorZoneId);
