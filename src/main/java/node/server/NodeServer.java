@@ -1,6 +1,7 @@
 package node.server;
 
 import communication.contractnet.*;
+import communication.emergency.EmergencyRequest;
 import communication.handoff.ArrivedOnScene;
 import communication.handoff.InterventionCompleted;
 import communication.handoff.OnSceneDeadline;
@@ -14,6 +15,8 @@ import domain.vehicle.VehicleId;
 import domain.vehicle.VehicleStatus;
 import io.vertx.core.Future;
 import io.vertx.core.VerticleBase;
+import io.vertx.core.json.DecodeException;
+import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
@@ -24,10 +27,12 @@ import node.persistence.VehicleRepository;
 import node.zone.EmergencyDispatcher;
 import node.zone.ZoneState;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 // server http del nodo
 public class NodeServer extends VerticleBase {
@@ -70,6 +75,7 @@ public class NodeServer extends VerticleBase {
         router.post("/contract-net/arrived-on-scene").handler(this::handleArrivedOnScene);
         router.post("/contract-net/on-scene-deadline").handler(this::handleOnSceneDeadline);
         router.post("/contract-net/intervention-completed").handler(this::handleInterventionCompleted);
+        router.post("/emergencies").handler(this::handleNewEmergency);
 
         // crea e avvia il server http vertx in ascolto sulla porta indicata
         return vertx.createHttpServer().requestHandler(router).listen(port);
@@ -215,5 +221,52 @@ public class NodeServer extends VerticleBase {
             zoneState.saveEmergency(emergency.get()); // salva lo stato aggiornato dell'emergenza nel db
         }
         ctx.response().setStatusCode(204).end(); // invia una risposta positiva (ack)
+    }
+
+    // gestisce la segnalazione di una nuova emergenza: legge e valida la richiesta (con il triage); se esiste già un'emergenza aperta della stessa categoria nelle vicinanze la segnalazione è una seconda osservazione di quella emergenza, altrimenti registra una nuova emergenza
+    private void handleNewEmergency(RoutingContext ctx) {
+        EmergencyRequest request;
+        try {
+            request = EmergencyRequest.fromJson(ctx.body().asJsonObject());
+        } catch (IllegalArgumentException | DecodeException e) { // se la richiesta non è valida (campo mancante, valore non valido, json malformato)
+            ctx.response().setStatusCode(400).putHeader("content-type", "text/plain").end("Invalid request: " + e.getMessage());
+            return;
+        }
+
+        // for prevention - can be eliminated
+        if (!zoneState.getZone().contains(request.position())) { // se la posizione non appartiene a questa zona (la gui ha inviato la richiesta alla zona sbagliata)
+            ctx.response().setStatusCode(400).putHeader("content-type", "text/plain").end("Invalid request: position outside the zone of this node");
+            return;
+        }
+
+        Optional<Emergency> existing = zoneState.findOpenEmergencyNear(request.type(), request.position()); // cerca un'emergenza già aperta della stessa categoria nelle vicinanze
+        if (existing.isPresent()) { // se esiste
+            registerRequest(existing.get(), request);
+            respondWithEmergencyId(ctx, 200, existing.get()); // risponde con l'id dell'emergenza già esistente
+        } else { // altrimenti è una nuova emergenza
+            respondWithEmergencyId(ctx, 201, createEmergency(request)); // risponde con l'id della nuova emergenza
+        }
+    }
+
+    // registra la segnalazione come seconda osservazione di un'emergenza già aperta: aggiorna gravità (media) e veicoli richiesti, e tenta di assegnare gli eventuali veicoli aggiuntivi (fasi 1 e 2)
+    private void registerRequest(Emergency emergency, EmergencyRequest request) {
+        emergency.updateRequest(request.triage().severity(), request.triage().vehiclesNeeded());
+        zoneState.saveEmergency(emergency); // salva l'emergenza aggiornata nel db
+        zoneState.handleUpdatedEmergency(emergency); // aggiorna l'emergenza
+    }
+
+    // crea la nuova emergenza e avvia le fasi 1, 2, 3
+    private Emergency createEmergency(EmergencyRequest request) {
+        Emergency emergency = new Emergency(new EmergencyId(UUID.randomUUID().toString()), request.type(), request.position(), zoneState.getZoneId(), Instant.now());
+        emergency.setSeverity(request.triage().severity()); // gravità determinata dal triage
+        emergency.setRequiredVehicles(request.triage().vehiclesNeeded()); // veicoli richiesti determinati dal triage
+        zoneState.addEmergency(emergency); // registra l'emergenza e la salva nel db
+        emergencyDispatcher.dispatch(emergency).onFailure(err -> System.err.println("Dispatch failed for emergency " + emergency.getId().value() + ": " + err.getMessage())); // avvia le fasi 1, 2, 3
+        return emergency;
+    }
+
+    // risponde con l'id dell'emergenza
+    private void respondWithEmergencyId(RoutingContext ctx, int statusCode, Emergency emergency) {
+        ctx.response().setStatusCode(statusCode).putHeader("content-type", "application/json").end(new JsonObject().put("emergencyId", emergency.getId().value()).encode());
     }
 }

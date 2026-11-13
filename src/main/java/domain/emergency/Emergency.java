@@ -120,25 +120,6 @@ public class Emergency {
         updateStatus();
     }
 
-    public void removeAssignedVehicle(VehicleId vehicleId) {
-        if (this.status == EmergencyStatus.CLOSED) {
-            throw new IllegalStateException("Cannot modify a closed emergency: " + id);
-        }
-        assignedVehicles.remove(vehicleId);
-        updateStatus();
-    }
-
-    // rimuove il veicolo che ha completato l'intervento, lo conta tra i completati della sua categoria e chiude l'emergenza se tutti i veicoli richiesti hanno terminato l'intervento
-    public void markVehicleCompleted(VehicleId vehicleId, VehicleCategory category) {
-        if (this.status == EmergencyStatus.CLOSED) {
-            throw new IllegalStateException("Cannot complete vehicle for a closed emergency: " + id);
-        }
-        if (assignedVehicles.remove(vehicleId)) {
-            completedVehicles.merge(category, 1, Integer::sum); // aggiunge 1 veicolo completato di quella categoria
-        }
-        updateStatus();
-    }
-
     // aggiorna lo stato dell'emergenza
     private void updateStatus() {
         int totalRequired = requiredVehicles.stream().mapToInt(VehicleRequirement::quantity).sum();
@@ -162,6 +143,11 @@ public class Emergency {
         return completedVehicles.values().stream().mapToInt(Integer::intValue).sum();
     }
 
+    // verifica se per ogni categoria richiesta i veicoli necessari hanno completato il proprio intervento
+    private boolean isFullyServed() {
+        return !requiredVehicles.isEmpty() && requiredVehicles.stream().allMatch(requirement -> getCompletedCount(requirement.category()) >= requirement.quantity());
+    }
+
     // aggiorna l'aging
     private void updateAging(EmergencyStatus newStatus) {
         boolean wasWaiting = isWaiting(this.status);
@@ -181,9 +167,53 @@ public class Emergency {
         return status == EmergencyStatus.QUEUED || status == EmergencyStatus.PARTIALLY_ASSIGNED;
     }
 
-    // verifica se per ogni categoria richiesta i veicoli necessari hanno completato il proprio intervento
-    private boolean isFullyServed() {
-        return !requiredVehicles.isEmpty() && requiredVehicles.stream().allMatch(requirement -> getCompletedCount(requirement.category()) >= requirement.quantity());
+    public void removeAssignedVehicle(VehicleId vehicleId) {
+        if (this.status == EmergencyStatus.CLOSED) {
+            throw new IllegalStateException("Cannot modify a closed emergency: " + id);
+        }
+        assignedVehicles.remove(vehicleId);
+        updateStatus();
+    }
+
+    // rimuove il veicolo che ha completato l'intervento, lo conta tra i completati della sua categoria e chiude l'emergenza se tutti i veicoli richiesti hanno terminato l'intervento
+    public void markVehicleCompleted(VehicleId vehicleId, VehicleCategory category) {
+        if (this.status == EmergencyStatus.CLOSED) {
+            throw new IllegalStateException("Cannot complete vehicle for a closed emergency: " + id);
+        }
+        if (assignedVehicles.remove(vehicleId)) {
+            completedVehicles.merge(category, 1, Integer::sum); // aggiunge 1 veicolo completato di quella categoria
+        }
+        updateStatus();
+    }
+
+    // gestisce una successiva richiesta della stessa emergenza
+    public void updateRequest(Severity newSeverity, List<VehicleRequirement> newRequirements) {
+        if (status == EmergencyStatus.CLOSED) {
+            throw new IllegalStateException("Cannot modify a closed emergency: " + id);
+        }
+        severity = averageSeverity(severity, newSeverity);
+        Map<VehicleCategory, Integer> requirementsByCategory = new LinkedHashMap<>(); // veicoli richiesti per categoria
+        for (VehicleRequirement requirement : requiredVehicles) { // per ogni veicolo già richiesto
+            requirementsByCategory.merge(requirement.category(), requirement.quantity(), Math::max); // confronta il valore presente nella mappa requirementsByCategory (se esiste) con quello in requiredVehicles, e sceglie il massimo e aggiorna requirementsByCategory
+        }
+        for (VehicleRequirement requirement : newRequirements) { // per ogni veicolo richiesto dalla nuova segnalazione
+            requirementsByCategory.merge(requirement.category(), requirement.quantity(), Math::max); // confronta il valore presente nella mappa requirementsByCategory (se esiste) con quello in newRequirements, sceglie il massimo e aggiorna requirementsByCategory
+        }
+        List<VehicleRequirement> mergedRequirements = new ArrayList<>();
+        requirementsByCategory.forEach((category, quantity) -> mergedRequirements.add(new VehicleRequirement(category, quantity)));
+        requiredVehicles = mergedRequirements; // sostituisce la lista originale con la nuova
+        updateStatus(); // la nuova richiesta può rendere l'emergenza di nuovo "in attesa"
+    }
+
+    // calcola la media, arrotondata per difetto, tra le due gravità dell'emergenza
+    private static Severity averageSeverity(Severity first, Severity second) {
+        int averageWeight = (first.getWeight() + second.getWeight()) / 2;
+        for (Severity severity : Severity.values()) {
+            if (severity.getWeight() == averageWeight) {
+                return severity;
+            }
+        }
+        throw new IllegalStateException("No severity with weight " + averageWeight);
     }
 
     // ricostruisce un'emergenza salvata nel db prima del crash, con lo stato e l'aging che aveva

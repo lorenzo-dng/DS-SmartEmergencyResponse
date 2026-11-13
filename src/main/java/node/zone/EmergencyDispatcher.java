@@ -28,15 +28,16 @@ public class EmergencyDispatcher {
 
     // gestisce una nuova emergenza, prima localmente (fasi 1 e 2), poi cross-zona (fase 3)
     public Future<Void> dispatch(Emergency emergency) {
-        List<VehicleCategory> stillUncovered = zoneState.handleNewEmergency(emergency); // recupera le categorie di veicoli ancora da assegnare (dopo aver eseguito fase 1 e 2)
+        List<VehicleCategory> stillUncovered = zoneState.handleEmergency(emergency); // recupera le categorie di veicoli ancora da assegnare (dopo aver eseguito fase 1 e 2)
         List<Future<Void>> categoryFutures = new ArrayList<>();
         for (VehicleCategory category : stillUncovered) { // per ogni categoria di veicolo ancora scoperta
-            categoryFutures.add(requestProposalsForCategory(emergency, category));
+            categoryFutures.add(requestProposalsForCategory(emergency, category)); // esegue la fase 3
         }
         return Future.join(categoryFutures).mapEmpty(); // attende tutte e restituisce Future<Void>
     }
 
-    // gestisce l'invio della richiesta di una categoria di veicolo alle zone vicine
+    // fase 3
+
     private Future<Void> requestProposalsForCategory(Emergency emergency, VehicleCategory category) {
         int missing = zoneState.missingCount(emergency, category); // recupera il numero di veicoli di una categoria ancora da assegnare
         if (missing == 0) { // se non ce ne sono, allora termina

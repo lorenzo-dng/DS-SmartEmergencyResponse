@@ -2,7 +2,6 @@ package domain.triage;
 
 import domain.triage.assault.AssaultAnswers;
 import domain.triage.assault.AssaultTriage;
-import domain.triage.cardiacarrest.CardiacArrestAnswers;
 import domain.triage.cardiacarrest.CardiacArrestTriage;
 import domain.triage.common.TriageResult;
 import domain.triage.fire.FireAnswers;
@@ -19,8 +18,7 @@ import domain.triage.roadobstruction.RoadObstructionTriage;
 // può essere vista come un'interfaccia, che in base all'emergenza richiama il suo metodo di valutazione (gravita + veicoli)
 public class TriageFacade {
 
-    // answers non contiene dati, non viene utilizzato. Tuttavia è necessario per mantenere la stessa firma del metodo classify con tutti gli altri
-    public static TriageResult classify(CardiacArrestAnswers answers) {
+    public static TriageResult classify() {
         return CardiacArrestTriage.evaluate();
     }
 

@@ -40,7 +40,6 @@ public class Main {
         NeighborHealth neighborHealth = new NeighborHealth(myZone.getNeighbors());
         NodeClient client = new NodeClient(vertx, config::addressFor, neighborHealth, config.neighborTimeoutMs(), config.handoffRetryIntervalMs());
         ContractNetNodeClient contractNetClient = new ContractNetNodeClient(vertx, config::addressFor, neighborHealth, config.neighborTimeoutMs());
-        // TODO: usare emergencyDispatcher.dispatch(...) nella logica di gestione emergenze (endpoint che riceve le nuove emergenze)
         EmergencyDispatcher emergencyDispatcher = new EmergencyDispatcher(zoneState, contractNetClient, myZone.getNeighbors());
         VehicleLifecycleManager lifecycleManager = new VehicleLifecycleManager(zoneState, vertx, vehicleRepository, client);
 

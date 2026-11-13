@@ -57,6 +57,10 @@ public class ZoneState {
         this.emergencyRepository = emergencyRepository;
     }
 
+    public Zone getZone() {
+        return zone;
+    }
+
     public ZoneId getZoneId() {
         return zone.getId();
     }
@@ -94,11 +98,11 @@ public class ZoneState {
 
     // restituisce una copia dei veicoli presi in prestito (è necessaria una copia e non una vista immutabile perchè potrebbero sollevarsi eccezioni nel ciclo for di resendUnconfirmedResolutions se l'emergenze viene rimossa)
     public Map<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> getBorrowedVehicles() {
-        Map<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> vehicles = new HashMap<>();
+        Map<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> vehiclesCopy = new HashMap<>();
         for (Map.Entry<EmergencyId, Map<VehicleId, BorrowedVehicleInfo>> entry : borrowedVehicles.entrySet()) {
-            vehicles.put(entry.getKey(), new HashMap<>(entry.getValue()));
+            vehiclesCopy.put(entry.getKey(), new HashMap<>(entry.getValue()));
         }
-        return vehicles;
+        return vehiclesCopy;
     }
 
     // restituisce la zona del contractor che ha prestato il veicolo
@@ -235,13 +239,13 @@ public class ZoneState {
     // assegnazione locale
 
     // (orchestrazione) gestisce le emergenze in arrivo
-    public List<VehicleCategory> handleNewEmergency(Emergency emergency) {
+    public List<VehicleCategory> handleEmergency(Emergency emergency) {
         List<VehicleCategory> stillUncovered = new ArrayList<>(); // veicoli mancanti
         for (VehicleRequirement requirement : emergency.getRequiredVehicles()) { // per ogni veicolo richiesto dall'emergenza (categoria + quantita)
             VehicleCategory category = requirement.category();
             assignAvailableVehicles(category); // fase 1
             reassignEnRouteVehicles(category); // fase 2
-            releaseSurplusBackup(emergency, category); // libera i veicoli di backup in eccesso rispetto agli slot ancora scoperti (non è possibile avere solo resolvePendingBackups, magari eseguita alla fine della fase 3, perchè altrimenti i veicoli di backup resterebbero non utilizzabili fino al completamento della fase 3)
+            releaseSurplusBackup(emergency, category); // libera i veicoli di backup in eccesso rispetto agli slot ancora scoperti (non è possibile avere solo resolvePendingBackups, alla fine della fase 3, perchè altrimenti i veicoli di backup resterebbero non utilizzabili fino al completamento della fase 3)
             if (missingCount(emergency, category) > 0) { // se mancano ancora veicoli di quella categoria, i suoi veicoli di backup aspettano l'esito della fase 3
                 vehicleBackupAwaitingPhase3.add(new PendingReservationKey(emergency.getId(), category)); // aggiunge id emergenza + categoria veicolo alla mappa di veicoli di backup che aspettano la fase 3
                 stillUncovered.add(category);
@@ -249,13 +253,6 @@ public class ZoneState {
             resolvePendingBackups(category); // attiva i veicoli di backup per le altre emergenze aperte
         }
         return stillUncovered;
-    }
-
-    // rivaluta le emergenze quando si libera un veicolo: fase 1 e fase 2 (la fase 3 non viene ripetuta), poi attiva i backup rimasti
-    public void handleVehicleAvailable(VehicleCategory category) {
-        assignAvailableVehicles(category); // fase 1
-        reassignEnRouteVehicles(category); // fase 2
-        resolvePendingBackups(category);
     }
 
     // fase 1
@@ -273,7 +270,7 @@ public class ZoneState {
                     Emergency emergency = slots.get(assignment[i]); // recupera lo slot (sarebbe il riferimento all'emergenza stessa) corrispondente al veicolo assegnato
                     double distanceKm = GeoUtils.haversine(vehicle.getPosition(), emergency.getPosition());
                     double arrivalMinutes = GeoUtils.estimatedArrivalMinutes(distanceKm, category);
-                    if (isTooFar(emergency, arrivalMinutes)) { // troppo lontano per un'emergenza ad alta gravità: tenuto come piano B, si tenta prima la fase 3
+                    if (isTooFar(emergency, arrivalMinutes)) { // se il veicolo è troppo lontano per un'emergenza high, viene tenuto come piano B, e si tenta prima la fase 3
                         holdAsBackup(vehicle, emergency, category);
                     } else {
                         assignVehicle(vehicle, emergency);
@@ -501,21 +498,19 @@ public class ZoneState {
     private void releaseSurplusBackup(Emergency emergency, VehicleCategory category) {
         PendingReservationKey key = new PendingReservationKey(emergency.getId(), category);
         List<VehicleId> backup = vehicleBackupReservations.get(key);
-        if (backup == null) { // se non ci sono veicoli di backup
-            return;
-        }
-        int missing = Math.max(0, missingCount(emergency, category)); // slot ancora scoperti
-        if (backup.size() <= missing) { // se non ci sono veicoli di backup in eccesso
-            return;
-        }
-        backup.sort(Comparator.comparingDouble(vehicleId -> GeoUtils.haversine(getVehicle(vehicleId).getPosition(), emergency.getPosition()))); // ordina i veicoli dal più vicino al più lontano dall'emergenza
-        List<VehicleId> surplus = backup.subList(missing, backup.size()); // lista di veicoli in eccesso più lontani
-        for (VehicleId vehicleId : surplus) { // libera tutti i veicoli in eccesso più lontani
-            getVehicle(vehicleId).setStatus(VehicleStatus.AVAILABLE);
-        }
-        surplus.clear(); // rimuove i veicoli in eccesso più lontani dalla lista backup
-        if (backup.isEmpty()) { // se sono stati rimossi tutti i veicoli di backup (perchè la fase 2, in precedenza, ha trovato i veicoli rimanenti)
-            vehicleBackupReservations.remove(key); // li rimuove dalla lista originale
+        if (backup != null) { // se ci sono veicoli di backup
+            int missing = Math.max(0, missingCount(emergency, category)); // slot ancora scoperti
+            if (backup.size() > missing) { // se ci sono veicoli di backup in eccesso
+                backup.sort(Comparator.comparingDouble(vehicleId -> GeoUtils.haversine(getVehicle(vehicleId).getPosition(), emergency.getPosition()))); // ordina i veicoli dal più vicino al più lontano dall'emergenza
+                List<VehicleId> surplus = backup.subList(missing, backup.size()); // lista di veicoli in eccesso più lontani
+                for (VehicleId vehicleId : surplus) { // libera tutti i veicoli in eccesso più lontani
+                    getVehicle(vehicleId).setStatus(VehicleStatus.AVAILABLE);
+                }
+                surplus.clear(); // rimuove i veicoli in eccesso più lontani dalla lista backup
+                if (backup.isEmpty()) { // se sono stati rimossi tutti i veicoli di backup (perchè la fase 2, in precedenza, ha trovato i veicoli rimanenti)
+                    vehicleBackupReservations.remove(key); // li rimuove dalla lista originale
+                }
+            }
         }
     }
 
@@ -540,27 +535,55 @@ public class ZoneState {
     private void activateBackup(Emergency emergency, PendingReservationKey key) {
         releaseSurplusBackup(emergency, key.category()); // rilascia i veicoli di backup in eccesso per l'emergenza
         List<VehicleId> backup = vehicleBackupReservations.remove(key); // prende tutti i veicoli di backup rimasti
-        if (backup == null) { // se non ce ne sono
-            return;
+        if (backup != null) { // se ce ne sono
+            for (VehicleId vehicleId : backup) { // assegna ogni veicoli di backup all'emergenza
+                Vehicle vehicle = getVehicle(vehicleId);
+                vehicle.setStatus(VehicleStatus.EN_ROUTE);
+                vehicle.setDestination(emergency.getPosition());
+                emergency.addAssignedVehicle(vehicle.getId());
+                saveVehicleAndEmergencies(vehicle.getId(), VehicleStatus.EN_ROUTE, vehicle.getPosition(), emergency.getPosition(), vehicle.getBatteryLevel(), null, null, null, emergency); // salva il checkpoint del veicolo e l'emergenza, così da ripristinarli in caso di crash
+            }
         }
-        for (VehicleId vehicleId : backup) { // assegna ogni veicoli di backup all'emergenza
-            Vehicle vehicle = getVehicle(vehicleId);
-            vehicle.setStatus(VehicleStatus.EN_ROUTE);
-            vehicle.setDestination(emergency.getPosition());
-            emergency.addAssignedVehicle(vehicle.getId());
-            saveVehicleAndEmergencies(vehicle.getId(), VehicleStatus.EN_ROUTE, vehicle.getPosition(), emergency.getPosition(), vehicle.getBatteryLevel(), null, null, null, emergency); // salva il checkpoint del veicolo e l'emergenza, così da ripristinarli in caso di crash
+    }
+
+    // cerca un'emergenza già aperta della stessa categoria entro la distanza indicata dalla posizione
+    public Optional<Emergency> findOpenEmergencyNear(EmergencyType type, Position position) {
+        return getOpenEmergencies().stream()
+                .filter(emergency -> emergency.getType() == type && GeoUtils.haversine(emergency.getPosition(), position) <= duplicateDistanceKm(type))
+                .min(Comparator.comparingDouble(emergency -> GeoUtils.haversine(emergency.getPosition(), position))); // restituisce l'emergenza piu vicina (se ne esiste più di una)
+    }
+
+    // distanza massima (in km) entro cui due segnalazioni dello stesso tipo sono considerate la stessa emergenza
+    private static double duplicateDistanceKm(EmergencyType type) {
+        return switch (type) {
+            case FIRE, POWER_GRID_FAILURE -> 0.5;
+            case ROAD_ACCIDENT, ROAD_OBSTRUCTION -> 0.2;
+            case CARDIAC_ARREST, INJURY, ASSAULT -> 0.1;
+        };
+    }
+
+    // dopo l'aggiornamento di un'emergenza rivaluta l'assegnazione dei veicoli
+    public void handleUpdatedEmergency(Emergency emergency) {
+        for (VehicleRequirement requirement : emergency.getRequiredVehicles()) {
+            handleVehicleAvailable(requirement.category());
         }
+    }
+
+    // rivaluta le emergenze quando si libera un veicolo: fase 1 e fase 2 (la fase 3 non viene ripetuta), poi attiva i backup rimasti
+    public void handleVehicleAvailable(VehicleCategory category) {
+        assignAvailableVehicles(category); // fase 1
+        reassignEnRouteVehicles(category); // fase 2
+        resolvePendingBackups(category);
     }
 
     // gestisce i veicoli di backup al termine della fase 3: rilascia quelli in eccesso e attiva quelli che servono ancora
     public void resolveVehicleBackup(EmergencyId emergencyId, VehicleCategory category) {
         PendingReservationKey key = new PendingReservationKey(emergencyId, category);
         vehicleBackupAwaitingPhase3.remove(key); // la fase 3 è conclusa
-        if (!vehicleBackupReservations.containsKey(key)) { // nessun veicolo di backup esistente di quella categoria
-            return;
+        if (vehicleBackupReservations.containsKey(key)) { // se esiste almeno un veicolo di backup di quella categoria
+            Emergency emergency = getEmergency(emergencyId).orElseThrow(() -> new IllegalArgumentException("Emergency not found in this zone: " + emergencyId));
+            activateBackup(emergency, key);
         }
-        Emergency emergency = getEmergency(emergencyId).orElseThrow(() -> new IllegalArgumentException("Emergency not found in this zone: " + emergencyId));
-        activateBackup(emergency, key);
     }
 
     // prenotazioni cross-zona

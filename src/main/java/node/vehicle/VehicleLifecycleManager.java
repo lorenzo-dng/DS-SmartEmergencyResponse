@@ -73,7 +73,7 @@ public class VehicleLifecycleManager {
         }
     }
 
-    // verifica se un veicolo è in viaggio (verso l'evento o verso la base)
+    // verifica se un veicolo è in viaggio (verso l'emergenza o verso la base)
     private boolean isTravelling(Vehicle vehicle) {
         return vehicle.getStatus() == VehicleStatus.EN_ROUTE || (vehicle.getStatus() == VehicleStatus.AVAILABLE && vehicle.getDestination() != null);
     }
