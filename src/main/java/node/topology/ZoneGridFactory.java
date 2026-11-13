@@ -1,5 +1,7 @@
 package node.topology;
 
+import domain.common.Position;
+import domain.utils.GeoUtils;
 import domain.zone.Zone;
 import domain.zone.ZoneId;
 import java.util.HashMap;
@@ -10,8 +12,29 @@ import java.util.Set;
 // costruisce una griglia della città, con confini interni semiaperti [min, max) e confine esterno assoluto chiuso sul lato estremo
 public class ZoneGridFactory {
 
-    // metodo di creazione della griglia
-    public static Map<ZoneId, Zone> buildGrid(int rows, int cols, double mapLatMin, double mapLatMax, double mapLonMin, double mapLonMax) {
+    public static final double MAX_ZONE_SIDE_KM = 12.0; // lato massimo (in km) di una zona
+    private static final double GRID_EPSILON = 1e-9;
+
+    // calcola il numero di righe della griglia
+    public static int rowsFor(double mapLatMin, double mapLatMax, double mapLonMin) {
+        double heightKm = GeoUtils.haversine(new Position(mapLatMin, mapLonMin), new Position(mapLatMax, mapLonMin));
+        return Math.max(1, (int) Math.ceil(heightKm / MAX_ZONE_SIDE_KM - GRID_EPSILON));
+    }
+
+    // calcola il numero di colonne della griglia
+    public static int colsFor(double mapLatMin, double mapLatMax, double mapLonMin, double mapLonMax) {
+        double midLat = (mapLatMin + mapLatMax) / 2;
+        double widthKm = GeoUtils.haversine(new Position(midLat, mapLonMin), new Position(midLat, mapLonMax));
+        return Math.max(1, (int) Math.ceil(widthKm / MAX_ZONE_SIDE_KM - GRID_EPSILON));
+    }
+
+    // crea la griglia
+    public static Map<ZoneId, Zone> buildGrid(double mapLatMin, double mapLatMax, double mapLonMin, double mapLonMax) {
+        return build(rowsFor(mapLatMin, mapLatMax, mapLonMin), colsFor(mapLatMin, mapLatMax, mapLonMin, mapLonMax), mapLatMin, mapLatMax, mapLonMin, mapLonMax);
+    }
+
+    // crea la griglia
+    private static Map<ZoneId, Zone> build(int rows, int cols, double mapLatMin, double mapLatMax, double mapLonMin, double mapLonMax) {
         double cellHeight = (mapLatMax - mapLatMin) / rows; // altezza di ogni zona
         double cellWidth = (mapLonMax - mapLonMin) / cols; // larghezza di ogni zona
 

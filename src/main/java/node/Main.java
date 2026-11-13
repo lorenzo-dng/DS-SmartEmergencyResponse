@@ -23,7 +23,7 @@ public class Main {
     public static void main(String[] args) {
         NodeConfig config = NodeConfig.fromEnvironment(); // legge i parametri della zona da creare dalle variabili d'ambiente Docker (proprie del container avviato)
         ZoneId myZoneId = ZoneGridFactory.zoneIdOf(config.zoneRow(), config.zoneCol()); // definisce l'id della zona
-        Map<ZoneId, Zone> grid = ZoneGridFactory.buildGrid(config.gridRows(), config.gridCols(), config.mapLatMin(), config.mapLatMax(), config.mapLonMin(), config.mapLonMax()); // costruisce la griglia
+        Map<ZoneId, Zone> grid = ZoneGridFactory.buildGrid(config.mapLatMin(), config.mapLatMax(), config.mapLonMin(), config.mapLonMax()); // costruisce la griglia
         Zone myZone = grid.get(myZoneId); // crea la zona (cercandola per id nella mappa restituita dalla creazione della griglia)
         if (myZone == null) {
             throw new IllegalStateException("Zone not found in computed grid: " + myZoneId);
