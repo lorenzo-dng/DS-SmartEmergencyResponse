@@ -1,0 +1,82 @@
+{
+  "rome-center": {
+    "bounds": {
+      "latMin": 41.8,
+      "latMax": 41.99,
+      "lonMin": 12.4,
+      "lonMax": 12.6
+    },
+    "grid": {
+      "rows": 2,
+      "cols": 2
+    },
+    "fleet": {
+      "zone-0-0": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2,
+        "HELICOPTER": 1
+      },
+      "zone-0-1": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2
+      },
+      "zone-1-0": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2
+      },
+      "zone-1-1": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2,
+        "HELICOPTER": 1
+      }
+    }
+  },
+  "cesena": {
+    "bounds": {
+      "latMin": 44.0202,
+      "latMax": 44.2332,
+      "lonMin": 12.0945,
+      "lonMax": 12.3621
+    },
+    "grid": {
+      "rows": 2,
+      "cols": 2
+    },
+    "fleet": {
+      "zone-0-0": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2,
+        "HELICOPTER": 1
+      },
+      "zone-0-1": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2
+      },
+      "zone-1-0": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2
+      },
+      "zone-1-1": {
+        "POLICE": 3,
+        "AMBULANCE": 3,
+        "FIRE_SERVICE": 2,
+        "TECHNICAL_RESCUE": 2,
+        "HELICOPTER": 1
+      }
+    }
+  }
+}

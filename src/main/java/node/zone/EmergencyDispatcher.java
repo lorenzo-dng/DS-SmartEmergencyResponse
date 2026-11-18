@@ -19,6 +19,8 @@ public class EmergencyDispatcher {
     private final ZoneState zoneState;
     private final ContractNetNodeClient contractNetClient;
     private final Set<ZoneId> neighbors;
+    private record FlatOffer(ZoneId contractorZoneId, VehicleId vehicleId, double distanceKm, double batteryLevel, int availableFleetCount) {} // utilizzato dall'initiator: rappresenta una singola offerta di veicolo proposta dal contractor
+    private record ContractorCategory(ZoneId contractorZoneId, VehicleCategory category) {}// contractor e categoria dei veicoli presi in prestito
 
     public EmergencyDispatcher(ZoneState zoneState, ContractNetNodeClient contractNetClient, Set<ZoneId> neighbors) {
         this.zoneState = zoneState;
